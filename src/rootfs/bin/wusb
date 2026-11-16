@@ -1,0 +1,37 @@
+#!/bin/sh
+# wusb - mount the first removable disk read-write (USB stick for reports)
+#
+# usage: wusb            mount it and print where it is
+#        wusb sdb1       use a specific partition
+
+. /lib/wrecovery.sh
+
+pick=""
+if [ -n "$1" ]; then
+	pick=${1##*/}
+else
+	for d in /sys/class/block/*; do
+		[ -e "$d/removable" ] || continue
+		[ "$(cat "$d/removable")" = 1 ] || continue
+		n=${d##*/}
+		case $n in
+		sd*|mmcblk*|vd*) ;;
+		*) continue ;;
+		esac
+		for p in $(list_partitions); do
+			case $p in
+			"$n"*) pick=$p; break ;;
+			esac
+		done
+		[ -n "$pick" ] && break
+	done
+	[ -n "$pick" ] || die "no removable disk found - plug a USB stick in and retry, or run: wmount -l"
+fi
+
+[ -f "$MOUNT_DB" ] || db_reset
+mount_part "$pick" "/dev/$pick" rw || die "$pick: could not mount read-write"
+mp=$MOUNT_ROOT/$pick
+[ -w "$mp" ] || die "$mp is not writable"
+
+msg "USB stick mounted read-write at $mp"
+msg "save reports with:  wsave $mp"

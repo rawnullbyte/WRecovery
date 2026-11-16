@@ -1,0 +1,37 @@
+#!/bin/sh
+# whelp - what you can do here
+
+. /lib/wrecovery.sh
+
+cat <<EOF
+WRecovery $WRE_VERSION - offline Windows recovery shell
+
+  wdisks                 list disks, partitions, filesystems, Windows installs
+  wmount                 mount every Windows volume read-only (default)
+  wmount -w sdb1         mount one volume read-write
+  wmount -u              unmount everything
+  wusb                   mount a USB stick read-write (for wsave)
+  wnet                   recover network config, wifi profiles, VPN, proxy
+  wnet /mnt/nvme0n1p3    only scan one volume
+  wsave /mnt/sdb1        copy /run/reports to a USB stick
+
+  wpasswd                list local Windows accounts
+  wpasswd <user>         clear a local account's password (empty password)
+  wpasswd <vol> <user>   same, on a specific volume (see wdisks)
+  wfind '*.pbk'          search all mounted volumes
+
+  winreg                 offline registry reader (see: winreg --help)
+    winreg ls     /mnt/x/Windows/System32/config/SYSTEM
+    winreg values /mnt/x/Windows/System32/config/SYSTEM 'ControlSet001\\Services\\Tcpip\\Parameters\\Interfaces\\{GUID}'
+    winreg dump   /mnt/x/Windows/System32/config/SOFTWARE 'Microsoft\\Windows NT\\CurrentVersion'
+    winreg get    <hive> <key> <value>
+
+Reports land in $REPORT_DIR:
+  network-<vol>.txt      readable summary
+  network-<vol>.tsv      machine readable
+  restore-<vol>.cmd      netsh script to rebuild the config on Windows
+  wifi-<vol>/*.xml       WLAN profiles (import with: netsh wlan add profile)
+
+Everything is mounted read-only unless you ask for -w. wpasswd remounts the
+volume it needs read-write, and keeps a backup of the SAM hive it edits.
+EOF

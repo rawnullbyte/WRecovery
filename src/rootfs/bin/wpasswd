@@ -1,0 +1,186 @@
+#!/bin/sh
+# wpasswd - clear the password of a local Windows account (offline)
+#
+#   wpasswd                     list local accounts of every Windows install
+#   wpasswd <user>              clear <user>'s password on the only install
+#   wpasswd <volume> <user>     clear it on a specific volume (e.g. nvme0n1p3)
+#
+# The account is enabled and unlocked at the same time, exactly like the
+# classic "clear password" in ntpasswd/chntpw: both stored hash lengths are
+# set to zero, so Windows treats the password as empty. Nothing else in the
+# hive is touched.
+#
+# The volume is remounted read-write for the operation and left read-write
+# afterwards, so that Windows does not have to replay a stale journal.
+#
+#   -y, --yes     do not ask for confirmation
+#   -n, --dry-run show what would be done
+#
+# After a successful reset, boot Windows and log in with an empty password.
+# Windows may still ask for a BitLocker recovery key (that is the disk
+# encryption, not the account) or for a Microsoft account password (MSA logins
+# are validated online and cannot be reset offline).
+
+. /lib/wrecovery.sh
+
+YES=0
+DRY=0
+ARGS=""
+for a in "$@"; do
+	case $a in
+	-y|--yes) YES=1 ;;
+	-n|--dry-run) DRY=1 ;;
+	-h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+	-*) die "unknown option: $a" ;;
+	*) ARGS="$ARGS $a" ;;
+	esac
+done
+set -- $ARGS
+
+[ -f "$MOUNT_DB" ] || mount_all ro >/dev/null 2>&1
+
+# ---------------------------------------------------------------- find SAMs --
+
+# sam_hive <winroot>
+sam_hive() {
+	for p in "System32/config/SAM" "system32/config/SAM" \
+		 "System32/config/sam" "system32/config/sam"; do
+		[ -f "$1/$p" ] && { printf '%s\n' "$1/$p"; return 0; }
+	done
+	return 1
+}
+
+# list_installs: prints "<volume>|<winroot>|<sam>"
+list_installs() {
+	wnet_targets | while read -r mp; do
+		for wroot in $(win_roots "$mp"); do
+			sam=$(sam_hive "$wroot") || continue
+			printf '%s|%s|%s\n' "${mp##*/}" "$wroot" "$sam"
+		done
+	done
+}
+
+installs=$(list_installs)
+if [ -z "$installs" ]; then
+	die "no Windows installation with a SAM hive found (try: wmount)"
+fi
+
+# ------------------------------------------------------------------ listing --
+
+show_users() { # sam
+	vol=$1
+	sam=$2
+	printf '\n== %s  (%s)\n' "$vol" "$sam"
+	winreg sam-users "$sam" 2>&1 | sed 's/^/  /'
+}
+
+if [ $# -eq 0 ]; then
+	printf '%s\n' "$installs" | while IFS='|' read -r vol wroot sam; do
+		show_users "$vol" "$sam"
+	done
+	cat <<EOF
+
+To clear a password:
+  wpasswd <user>              (when there is exactly one Windows install)
+  wpasswd <volume> <user>     (e.g. wpasswd nvme0n1p3 Administrator)
+
+"blank-pw" means the account already has an empty password.
+EOF
+	exit 0
+fi
+
+# --------------------------------------------------------------- pick target --
+
+if [ $# -eq 1 ]; then
+	user=$1
+	vol=""
+	n=$(printf '%s\n' "$installs" | grep -c . || true)
+	if [ "${n:-0}" -gt 1 ]; then
+		printf 'more than one Windows installation:\n' >&2
+		printf '%s\n' "$installs" | while IFS='|' read -r v w s; do
+			printf '  %-12s %s\n' "$v" "$w" >&2
+		done
+		die "please name the volume: wpasswd <volume> $user"
+	fi
+	vol=$(printf '%s\n' "$installs" | cut -d'|' -f1)
+else
+	vol=$1
+	user=$2
+fi
+
+line=$(printf '%s\n' "$installs" | awk -F'|' -v v="$vol" \
+	'$1 == v || $2 ~ v || $3 ~ v { print; exit }')
+[ -n "$line" ] || die "no Windows install on volume '$vol' (see: wdisks)"
+
+wroot=$(printf '%s' "$line" | cut -d'|' -f2)
+sam=$(printf '%s' "$line" | cut -d'|' -f3)
+dev=/dev/$vol
+
+# ------------------------------------------------------------ safety checks --
+
+is_mounted "$dev" || die "$vol is not mounted"
+opts=$(awk -v d="$dev" '$1 == d { print $4; exit }' /proc/mounts)
+mp=$(awk -v d="$dev" '$1 == d { print $2; exit }' /proc/mounts)
+
+case ,$opts, in
+*,ro,*)
+	if [ "$DRY" = 1 ]; then
+		:
+	else
+		msg "$vol is mounted read-only, remounting read-write"
+		mount -o remount,rw "$mp" 2>/dev/null || \
+			die "could not remount $mp read-write"
+	fi
+	;;
+esac
+
+# A hive with a pending log is fine for reading, but writing while Windows has
+# unflushed changes would be thrown away on the next boot.
+for l in "$sam.LOG1" "$sam.LOG2"; do
+	if [ -s "$l" ]; then
+		warn "$(basename "$l") is not empty: the hive has unflushed changes"
+		warn "Windows will replay its log and may undo the change. Booting"
+		warn "Windows once (then shutting down) and retrying is safer."
+	fi
+done
+
+# ---------------------------------------------------------------- confirmation --
+
+if [ "$DRY" = 1 ]; then
+	winreg sam-reset "$sam" "$user" --dry-run
+	exit $?
+fi
+
+cat <<EOF
+
+  volume    : $vol  ($mp)
+  windows   : $wroot
+  sam hive  : $sam
+  account   : $user
+
+  The password will be cleared (empty password) and the account enabled.
+  A backup of the hive is written next to it first.
+EOF
+
+if [ "$YES" != 1 ]; then
+	printf '\n  type YES to continue: '
+	read -r answer
+	[ "$answer" = YES ] || { msg "aborted"; exit 1; }
+fi
+
+stamp=$(date -u '+%Y%m%d-%H%M%S')
+backup="$sam.bak-$stamp"
+cp -f "$sam" "$backup" || die "could not write the backup $backup"
+# keep a copy with the reports so `wsave` carries it off the machine
+mkdir -p "$REPORT_DIR"
+cp -f "$sam" "$REPORT_DIR/SAM-backup-${vol}-$stamp" 2>/dev/null || true
+msg "backup: $backup"
+
+winreg sam-reset "$sam" "$user" || die "reset failed (see the message above)"
+
+# flush and keep the volume read-write: a dirty NTFS journal from the previous
+# crash is safest when the next boot can replay it against a mounted volume
+sync
+msg ""
+msg "Done. Boot Windows and log in as '$user' with an empty password."
+msg "Change it right away with Ctrl-Alt-Del -> Change a password."

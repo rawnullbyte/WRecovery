@@ -1,0 +1,455 @@
+#!/bin/sh
+# wnet - recover network configuration from offline Windows installs
+#
+# Reads the SYSTEM/SOFTWARE registry hives and the WLAN profile store of a
+# mounted Windows volume and writes reports to /run/reports:
+#
+#   network-<vol>.txt   human readable summary
+#   network-<vol>.tsv   machine readable (context<TAB>field<TAB>value)
+#   restore-<vol>.cmd   netsh script to rebuild the static configuration
+#   wifi-<vol>/         copies of the WLAN profile XMLs (importable on Windows)
+#
+# usage: wnet [-q] [mountpoint ...]
+
+. /lib/wrecovery.sh
+
+# ------------------------------------------------------------------ output --
+
+r()  { printf '%s\n' "$*" >>"$RPT"; }
+rt() { printf '  %-20s %s\n' "$1" "$2" >>"$RPT"; }
+t()  { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >>"$TSV"; }
+c()  { printf '%s\n' "$*" >>"$CMD"; }
+
+# Print every value of a key: readable block into the report, TSV records,
+# and a marker for the values we care about.
+dump_values() { # hive path context
+	winreg values "$1" "$2" 2>/dev/null | awk -F'\t' \
+		-v ctx="$3" -v rpt="$RPT" -v tsv="$TSV" '
+	{
+		name = $1; if (name == "") name = "(default)"
+		val = $3
+		printf "    %-28s %s\n", name, val >> rpt
+		printf "%s\t%s\t%s\n", ctx, name, val >> tsv
+	}'
+}
+
+# --------------------------------------------------------------- identity ---
+
+extract_identity() { # winroot mp
+	wroot=$1; mp=$2
+
+	product=""; build=""; owner=""; compname=""
+	if [ -n "$SOFTWARE" ]; then
+		pk='Microsoft\Windows NT\CurrentVersion'
+		product=$(reg_get "$SOFTWARE" "$pk" ProductName)
+		build=$(reg_get "$SOFTWARE" "$pk" CurrentBuild)
+		owner=$(reg_get "$SOFTWARE" "$pk" RegisteredOwner)
+		t "identity" "product" "$product"
+		t "identity" "build" "$build"
+		t "identity" "registered_owner" "$owner"
+	fi
+	compname=$(reg_get "$SYSTEM" "$CS\\Control\\ComputerName\\ComputerName" ComputerName)
+	[ -n "$compname" ] && t "identity" "computer_name" "$compname"
+
+	rt "windows root" "$wroot"
+	[ -n "$product" ] && rt "windows" "$product (build $build)"
+	[ -n "$compname" ] && rt "computer name" "$compname"
+	[ -n "$owner" ] && rt "registered owner" "$owner"
+	rt "control set" "$CS"
+}
+
+# ------------------------------------------------------------- interfaces ---
+
+iface_friendly_name() { # hive cs guid
+	n=$(reg_get "$1" "$2\\Control\\Network\\$WIN32_CLASS_GUID\\$3\\Connection" Name)
+	printf '%s' "$n"
+}
+
+iface_description() { # hive cs guid
+	cls="$2\\Control\\Class\\$WIN32_CLASS_GUID"
+	for inst in $(winreg keys "$1" "$cls" 2>/dev/null); do
+		id=$(reg_get "$1" "$cls\\$inst" NetCfgInstanceId)
+		if [ "$id" = "$3" ]; then
+			reg_get "$1" "$cls\\$inst" DriverDesc
+			return
+		fi
+	done
+	# fallback: SOFTWARE\...\NetworkCards
+	if [ -n "$SOFTWARE" ]; then
+		nk='Microsoft\Windows NT\CurrentVersion\NetworkCards'
+		for card in $(winreg keys "$SOFTWARE" "$nk" 2>/dev/null); do
+			svc=$(reg_get "$SOFTWARE" "$nk\\$card" ServiceName)
+			if [ "$svc" = "$3" ]; then
+				reg_get "$SOFTWARE" "$nk\\$card" Description
+				return
+			fi
+		done
+	fi
+}
+
+extract_interfaces() {
+	p="$CS\\Services\\Tcpip\\Parameters"
+	r ""
+	r "== IPv4 interfaces =="
+
+	if ! reg_has_key "$SYSTEM" "$p\\Interfaces"; then
+		r "  (no per-interface configuration stored in the registry)"
+		return
+	fi
+
+	for g in $(winreg keys "$SYSTEM" "$p\\Interfaces" 2>/dev/null); do
+		ipath="$p\\Interfaces\\$g"
+		friendly=$(iface_friendly_name "$SYSTEM" "$CS" "$g")
+		desc=$(iface_description "$SYSTEM" "$CS" "$g")
+		dhcp=$(reg_get "$SYSTEM" "$ipath" EnableDHCP)
+		ip=$(reg_get "$SYSTEM" "$ipath" IPAddress | head -1)
+		mask=$(reg_get "$SYSTEM" "$ipath" SubnetMask | head -1)
+		gw=$(reg_get "$SYSTEM" "$ipath" DefaultGateway | head -1)
+		ns=$(reg_get "$SYSTEM" "$ipath" NameServer)
+		dhcp_ip=$(reg_get "$SYSTEM" "$ipath" DhcpIPAddress)
+		dhcp_gw=$(reg_get "$SYSTEM" "$ipath" DhcpDefaultGateway)
+		dhcp_dns=$(reg_get "$SYSTEM" "$ipath" DhcpNameServer)
+		dhcp_srv=$(reg_get "$SYSTEM" "$ipath" DhcpServer)
+		dhcp_ssid=$(reg_get "$SYSTEM" "$ipath" DhcpNetworkHint)
+		domain=$(reg_get "$SYSTEM" "$ipath" Domain)
+		lease=$(reg_get "$SYSTEM" "$ipath" LeaseObtainedTime)
+
+		r ""
+		r "-- $g"
+		[ -n "$friendly" ] && rt "connection" "$friendly"
+		[ -n "$desc" ] && rt "adapter" "$desc"
+		case $dhcp in
+		0) rt "ip assignment" "static" ;;
+		1) rt "ip assignment" "DHCP" ;;
+		*) rt "ip assignment" "unset (Windows default: DHCP)" ;;
+		esac
+		[ -n "$ip" ] && rt "static address" "$ip / $mask"
+		[ -n "$gw" ] && rt "static gateway" "$gw"
+		[ -n "$ns" ] && rt "static dns" "$ns"
+		[ -n "$domain" ] && rt "domain" "$domain"
+		[ -n "$dhcp_ip" ] && rt "dhcp address" "$dhcp_ip / $(reg_get "$SYSTEM" "$ipath" DhcpSubnetMask)"
+		[ -n "$dhcp_gw" ] && rt "dhcp gateway" "$dhcp_gw"
+		[ -n "$dhcp_dns" ] && rt "dhcp dns" "$dhcp_dns"
+		[ -n "$dhcp_srv" ] && rt "dhcp server" "$dhcp_srv"
+		[ -n "$dhcp_ssid" ] && rt "last wifi ssid" "$dhcp_ssid"
+		if [ -n "$lease" ] && [ "$lease" != 0 ] 2>/dev/null; then
+			rt "lease obtained" "$(date -d "@$lease" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$lease")"
+		fi
+
+		t "ipv4:$g" "connection" "$friendly"
+		t "ipv4:$g" "adapter" "$desc"
+		t "ipv4:$g" "dhcp_enabled" "${dhcp:-unset}"
+		t "ipv4:$g" "ipaddress" "$ip"
+		t "ipv4:$g" "subnetmask" "$mask"
+		t "ipv4:$g" "defaultgateway" "$gw"
+		t "ipv4:$g" "nameserver" "$ns"
+		t "ipv4:$g" "dhcp_ipaddress" "$dhcp_ip"
+		t "ipv4:$g" "dhcp_defaultgateway" "$dhcp_gw"
+		t "ipv4:$g" "dhcp_nameserver" "$dhcp_dns"
+		t "ipv4:$g" "dhcp_server" "$dhcp_srv"
+		t "ipv4:$g" "dhcp_network_hint" "$dhcp_ssid"
+
+		r ""
+		r "   raw values:"
+		dump_values "$SYSTEM" "$ipath" "ipv4:$g"
+
+		# rebuild script for static interfaces
+		if [ "$dhcp" = 0 ] && [ -n "$ip" ]; then
+			n=${friendly:-$g}
+			c "REM $g ($n)"
+			c "netsh interface ipv4 set address name=\"$n\" static $ip $mask ${gw:-}"
+			if [ -n "$ns" ]; then
+				first=1
+				for d in $(printf '%s' "$ns" | tr ',;' '  '); do
+					if [ $first = 1 ]; then
+						c "netsh interface ipv4 set dns name=\"$n\" static $d primary"
+						first=0
+					else
+						c "netsh interface ipv4 add dns name=\"$n\" $d index=2"
+					fi
+				done
+			fi
+			c ""
+		fi
+
+		# IPv6, if present
+		p6="$CS\\Services\\Tcpip6\\Parameters\\Interfaces\\$g"
+		if reg_has_key "$SYSTEM" "$p6"; then
+			r ""
+			r "   IPv6 values:"
+			dump_values "$SYSTEM" "$p6" "ipv6:$g"
+		fi
+	done
+}
+
+# ------------------------------------------------------------------ routes --
+
+extract_routes() {
+	p="$CS\\Services\\Tcpip\\Parameters"
+	reg_has_key "$SYSTEM" "$p\\PersistentRoutes" || return 0
+	n=$(winreg values "$SYSTEM" "$p\\PersistentRoutes" 2>/dev/null | grep -c . || true)
+	[ "${n:-0}" -gt 0 ] || return 0
+	r ""
+	r "== Persistent static routes =="
+	winreg values "$SYSTEM" "$p\\PersistentRoutes" 2>/dev/null | awk -F'\t' \
+		-v rpt="$RPT" -v tsv="$TSV" '
+	{
+		printf "  %s\n", $3 >> rpt
+		printf "route\t%s\t%s\n", "persistent", $3 >> tsv
+	}'
+}
+
+# -------------------------------------------------------------------- wifi --
+
+xml_val() { # file tag
+	sed -e 's/\r//g' -e 's/></>\n</g' "$1" 2>/dev/null | awk -v t="$2" '
+		index($0, "<" t ">") {
+			sub(".*<" t ">", ""); sub("</" t ">.*", ""); print; exit
+		}'
+}
+
+xml_ssid() { # file -> SSID (the <name> inside <SSID>, not the profile name)
+	sed -e 's/\r//g' -e 's/></>\n</g' "$1" 2>/dev/null | awk '
+		/<SSID>/ { inside = 1; next }
+		inside && /<name>/ { sub(".*<name>", ""); sub("</name>.*", ""); print; exit }
+		/<\/SSID>/ { inside = 0 }'
+}
+
+extract_wifi() { # mp id
+	mp=$1; id=$2
+	base=""
+	for cand in \
+		"$mp/ProgramData/Microsoft/Wlansvc/Profiles/Interfaces" \
+		"$mp/ProgramData/Microsoft/WlanSvc/Profiles/Interfaces" \
+		"$mp/programdata/Microsoft/Wlansvc/Profiles/Interfaces" \
+		"$mp/ProgramData/Microsoft/Wlansvc/Profiles/interfaces"; do
+		[ -d "$cand" ] && { base=$cand; break; }
+	done
+	[ -n "$base" ] || return 0
+
+	r ""
+	r "== Wi-Fi profiles (Wlansvc) =="
+	wifidir="$REPORT_DIR/wifi-$id"
+	mkdir -p "$wifidir"
+	found=0
+	for gdir in "$base"/*; do
+		[ -d "$gdir" ] || continue
+		for f in "$gdir"/*.xml "$gdir"/*.XML; do
+			[ -f "$f" ] || continue
+			found=1
+			prof=$(xml_val "$f" name)
+			ssid=$(xml_ssid "$f")
+			auth=$(xml_val "$f" authentication)
+			enc=$(xml_val "$f" encryption)
+			prot=$(xml_val "$f" protected)
+			key=$(xml_val "$f" keyMaterial)
+
+			[ -n "$ssid" ] || ssid=$prof
+			case $prot in
+			true|TRUE|1)
+				keynote="<DPAPI protected - import the XML on Windows to use>"
+				;;
+			*)
+				keynote=${key:-<none>}
+				;;
+			esac
+
+			r ""
+			r "-- profile: ${prof:-?}"
+			rt "ssid" "$ssid"
+			rt "authentication" "$auth"
+			rt "encryption" "$enc"
+			rt "key" "$keynote"
+			rt "source" "$f"
+
+			t "wifi" "profile" "$prof"
+			t "wifi:$ssid" "authentication" "$auth"
+			t "wifi:$ssid" "encryption" "$enc"
+			t "wifi:$ssid" "key" "$keynote"
+			t "wifi:$ssid" "protected" "$prot"
+
+			safe=$(printf '%s' "${prof:-$ssid}" | tr -c 'A-Za-z0-9._-' '_')
+			cp -f "$f" "$wifidir/$safe.xml" 2>/dev/null
+		done
+	done
+	if [ "$found" = 0 ]; then
+		r "  (no profiles found)"
+		rmdir "$wifidir" 2>/dev/null
+	else
+		r ""
+		r "  profile XMLs copied to: $wifidir"
+		for f in "$wifidir"/*.xml; do
+			[ -f "$f" ] || continue
+			c "netsh wlan add profile filename=\"%~dp0wifi-$id\\${f##*/}\" user=all"
+		done
+	fi
+}
+
+# --------------------------------------------------------------- vpn / etc --
+
+extract_vpn() { # mp id
+	mp=$1; id=$2
+	pbk=""
+	for cand in \
+		"$mp/ProgramData/Microsoft/Network/Connections/Pbk/rasphone.pbk" \
+		"$mp/ProgramData/Microsoft/Network/Connections/PBK/rasphone.pbk" \
+		"$mp/programdata/Microsoft/Network/Connections/Pbk/rasphone.pbk"; do
+		[ -f "$cand" ] && { pbk=$cand; break; }
+	done
+	[ -n "$pbk" ] || return 0
+
+	r ""
+	r "== VPN / dial-up phonebook ($pbk) =="
+	# entries look like: [Name]\nHostName=...\nPhoneNumber=...
+	tr -d '\000' <"$pbk" 2>/dev/null | awk -v rpt="$RPT" -v tsv="$TSV" '
+		/^\[/ { name = $0; gsub(/^\[|\]$/, "", name); printf "\n  [%s]\n", name >> rpt; next }
+		/^[A-Za-z][A-Za-z0-9_]*=/ {
+			k = $0; sub(/=.*/, "", k)
+			v = $0; sub(/^[^=]*=/, "", v)
+			if (k ~ /HostName|PhoneNumber|Device|VpnStrategy|PreSharedKey|UserName|Domain/) {
+				printf "    %-16s %s\n", k, v >> rpt
+				printf "vpn:%s\t%s\t%s\n", name, k, v >> tsv
+			}
+		}'
+}
+
+extract_proxy() {
+	[ -n "$SOFTWARE" ] || return 0
+	pk='Microsoft\Windows\CurrentVersion\Internet Settings'
+	en=$(reg_get "$SOFTWARE" "$pk" ProxyEnable)
+	srv=$(reg_get "$SOFTWARE" "$pk" ProxyServer)
+	ovr=$(reg_get "$SOFTWARE" "$pk" ProxyOverride)
+	pac=$(reg_get "$SOFTWARE" "$pk" AutoConfigURL)
+	[ -n "$en$srv$ovr$pac" ] || return 0
+
+	r ""
+	r "== Proxy settings (WinINET) =="
+	rt "enabled" "${en:-0}"
+	[ -n "$srv" ] && rt "server" "$srv"
+	[ -n "$ovr" ] && rt "bypass" "$ovr"
+	[ -n "$pac" ] && rt "pac url" "$pac"
+	t "proxy" "enabled" "${en:-0}"
+	t "proxy" "server" "$srv"
+	t "proxy" "bypass" "$ovr"
+	t "proxy" "pac_url" "$pac"
+}
+
+extract_hosts() { # winroot
+	w=$1
+	for cand in "$w/System32/drivers/etc/hosts" "$w/system32/drivers/etc/hosts"; do
+		[ -f "$cand" ] || continue
+		r ""
+		r "== hosts file ($cand) =="
+		grep -v '^[[:space:]]*#' "$cand" 2>/dev/null | grep -v '^[[:space:]]*$' | \
+			sed 's/^/  /' >>"$RPT"
+		return 0
+	done
+}
+
+extract_dns() {
+	p="$CS\\Services\\Tcpip\\Parameters"
+	r ""
+	r "== Global TCP/IP settings =="
+	for v in Hostname Domain NV\ Domain NameServer DhcpNameServer SearchList \
+		 DhcpDomain EnableRouter; do
+		val=$(reg_get "$SYSTEM" "$p" "$v")
+		[ -n "$val" ] || continue
+		rt "$v" "$val"
+		t "global" "$v" "$val"
+	done
+}
+
+# ------------------------------------------------------------------- main ---
+
+extract_install() { # winroot mp
+	wroot=$1; mp=$2
+	id=${mp##*/}
+	case $wroot in *[Oo][Ll][Dd]*) id="$id-old" ;; esac
+
+	SYSTEM=$(system_hive "$wroot") || return 1
+	SOFTWARE=$(software_hive "$wroot")
+
+	RPT=$REPORT_DIR/network-$id.txt
+	TSV=$REPORT_DIR/network-$id.tsv
+	CMD=$REPORT_DIR/restore-$id.cmd
+	: >"$RPT"; : >"$TSV"
+
+	# resolve the active control set
+	cur=$(reg_get "$SYSTEM" Select Current)
+	CS=$(printf 'ControlSet%03d' "${cur:-1}")
+	reg_has_key "$SYSTEM" "$CS" || CS=$(printf 'ControlSet%03d' "$(reg_get "$SYSTEM" Select Default || echo 1)")
+
+	c "@echo off"
+	c "REM ============================================================"
+	c "REM  Network restore script generated by WRecovery $WRE_VERSION"
+	c "REM  Volume: $mp   Windows: $wroot"
+	c "REM  Run as Administrator. Review every line before running."
+	c "REM ============================================================"
+	c ""
+
+	r "=========================================================================="
+	r " WRecovery network configuration report"
+	r " version   : $WRE_VERSION"
+	r " generated : $(date -u '+%Y-%m-%d %H:%M UTC')"
+	r " volume    : $mp"
+	r "=========================================================================="
+
+	extract_identity "$wroot" "$mp"
+	extract_dns
+	extract_interfaces
+	extract_routes
+	extract_wifi "$mp" "$id"
+	extract_vpn "$mp" "$id"
+	extract_proxy
+	extract_hosts "$wroot"
+
+	r ""
+	r "=========================================================================="
+	r " files: $TSV"
+	r "        $CMD"
+	r "=========================================================================="
+
+	[ "$QUIET" = 1 ] || cat "$RPT"
+	return 0
+}
+
+# --------------------------------------------------------------- entrypoint --
+
+QUIET=0
+TARGETS=""
+for a in "$@"; do
+	case $a in
+	-q|--quiet) QUIET=1 ;;
+	-h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+	-*) die "unknown option: $a" ;;
+	*) TARGETS="$TARGETS $a" ;;
+	esac
+done
+
+[ -d "$REPORT_DIR" ] || mkdir -p "$REPORT_DIR"
+[ -f "$MOUNT_DB" ] || mount_all ro >/dev/null 2>&1
+
+if [ -z "$TARGETS" ]; then
+	TARGETS=$(wnet_targets)
+	if [ -z "$TARGETS" ]; then
+		[ "$QUIET" = 1 ] || msg "no mounted volume with a Windows install found (try: wmount)"
+		exit 1
+	fi
+fi
+
+rc=0
+for mp in $TARGETS; do
+	roots=$(win_roots "$mp")
+	if [ -z "$roots" ]; then
+		warn "$mp: no Windows directory found"
+		rc=1
+		continue
+	fi
+	for wroot in $roots; do
+		extract_install "$wroot" "$mp" || rc=1
+	done
+done
+
+[ "$QUIET" = 1 ] || msg ""
+[ "$QUIET" = 1 ] || msg "reports in $REPORT_DIR  (use 'wsave /mnt/<usb>' to copy them off)"
+exit $rc

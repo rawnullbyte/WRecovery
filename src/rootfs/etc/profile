@@ -1,0 +1,21 @@
+# /etc/profile - login shell setup for the WRecovery environment
+PATH=/bin:/sbin
+export PATH
+export PS1='$PWD # '
+export PAGER=cat
+
+alias ll='ls -l'
+alias la='ls -la'
+alias ..='cd ..'
+
+if [ -z "$WRE_BANNER_DONE" ]; then
+	WRE_BANNER_DONE=1
+	export WRE_BANNER_DONE
+	. /lib/wrecovery.sh
+	msg ""
+	msg "WRecovery $WRE_VERSION   (whelp for commands)"
+	msg "mounted volumes:"
+	db_lines | awk -F'|' '$3 == "mounted" { printf "  %-10s %-8s %s\n", $1, $4, $5 }'
+	msg "reports in $REPORT_DIR"
+	msg ""
+fi

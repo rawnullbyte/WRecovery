@@ -1,0 +1,29 @@
+#!/bin/sh
+# wsave - copy the collected reports to a writable volume (USB stick etc.)
+#
+# usage: wsave <destination directory>   e.g. wsave /mnt/sdb1
+#        wsave                           pick the first writable volume
+
+. /lib/wrecovery.sh
+
+dest=$1
+if [ -z "$dest" ]; then
+	dest=$(db_lines | awk -F'|' '$3 == "mounted" && $6 == "rw" { print $1; exit }')
+	if [ -z "$dest" ]; then
+		msg "no read-write volume mounted. Either:"
+		msg "  - plug in a USB stick and run: wmount -w"
+		msg "  - or mount one yourself: mount /dev/sdb1 /mnt/usb"
+		exit 1
+	fi
+	dest="$MOUNT_ROOT/$dest"
+fi
+
+[ -d "$dest" ] || die "$dest does not exist"
+[ -w "$dest" ] || die "$dest is not writable"
+
+out="$dest/wrecovery-reports-$(date -u '+%Y%m%d-%H%M%S')"
+mkdir -p "$out" || die "cannot create $out"
+cp -r "$REPORT_DIR"/. "$out"/ 2>/dev/null
+sync
+msg "reports copied to $out"
+ls -la "$out"

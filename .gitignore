@@ -1,0 +1,9 @@
+# build outputs
+.build/
+.cache/
+.tmp/
+out/
+
+# editor / OS noise
+*.swp
+.DS_Store

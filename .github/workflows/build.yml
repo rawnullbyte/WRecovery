@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Bump to invalidate the kernel build cache
+  CACHE_REV: 1
+
+jobs:
+  iso:
+    name: build iso
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libelf-dev libssl-dev \
+            xorriso grub-pc-bin grub-efi-amd64-bin \
+            python3 curl xz-utils cpio file \
+            qemu-system-x86 ovmf ntfs-3g fuse3
+
+      - name: cache kernel tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            .cache/linux-*.tar.xz
+            .cache/busybox-*.tar.bz2
+          key: kernel-${{ env.CACHE_REV }}-${{ hashFiles('src/kernel.fragment', 'src/busybox.config') }}
+          restore-keys: |
+            kernel-${{ env.CACHE_REV }}-
+
+      - name: build
+        run: ./build.sh --size-check
+
+      - name: test (bios + uefi boot, registry parser)
+        run: ./tests/run-tests.sh
+
+      - name: show iso size
+        run: |
+          ls -l out/
+          du -h out/*.iso
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wrecovery-iso
+          path: |
+            out/*.iso
+            out/*.iso.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: attach iso to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: iso
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wrecovery-iso
+          path: out
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WRecovery $GITHUB_REF_NAME" \
+            --generate-notes \
+            out/*.iso out/*.iso.sha256

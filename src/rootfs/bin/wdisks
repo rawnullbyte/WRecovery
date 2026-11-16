@@ -1,0 +1,53 @@
+#!/bin/sh
+# wdisks - list disks, partitions, filesystems and Windows installs
+
+. /lib/wrecovery.sh
+
+printf '%-14s %9s  %-7s %-12s %-18s %s\n' DEV SIZE FS LABEL MOUNT WINDOWS
+printf '%-14s %9s  %-7s %-12s %-18s %s\n' -------------- --------- ------- ------------ ------------------ -------
+
+for d in $(list_disks); do
+	printf '%-14s %9s  %s\n' "$d" "$(part_size "$d")" "$(disk_model "$d")"
+	if [ "$(db_get "$d" 3)" = mounted ]; then
+		mp="$MOUNT_ROOT/$d"
+		win=$(win_roots "$mp" | head -1)
+		case $win in
+		*[Oo][Ll][Dd]*) note="Windows.old" ;;
+		"") note="-" ;;
+		*) note="Windows" ;;
+		esac
+		printf '%-14s %9s  %-7s %-12s %-18s %s\n' \
+			"  (whole disk)" "$(part_size "$d")" "$(db_get "$d" 4)" \
+			"$(db_get "$d" 5)" "$mp" "$note"
+	fi
+	for p in $(list_partitions); do
+		case $p in
+		"$d"*) ;;
+		*) continue ;;
+		esac
+		dev=/dev/$p
+		st=$(db_get "$p" 3)
+		fst=$(db_get "$p" 4)
+		label=$(db_get "$p" 5)
+		if [ "$st" = mounted ]; then
+			mp="$MOUNT_ROOT/$p"
+			win=$(win_roots "$mp" | head -1)
+			case $win in
+			*[Oo][Ll][Dd]*) note="Windows.old" ;;
+			"") note="-" ;;
+			*) note="Windows" ;;
+			esac
+			printf '%-14s %9s  %-7s %-12s %-18s %s\n' \
+				"  $p" "$(part_size "$p")" "$fst" "${label:--}" "$mp" "$note"
+		else
+			case $st in
+			locked*) note="  $st" ;;
+			unmountable) note="  (unknown fs or not a windows volume)" ;;
+			"") note="" ;;
+			*) note="  $st" ;;
+			esac
+			printf '%-14s %9s  %-7s %-12s %-18s %s\n' \
+				"  $p" "$(part_size "$p")" "${fst:--}" "${label:--}" "-" "$note"
+		fi
+	done
+done

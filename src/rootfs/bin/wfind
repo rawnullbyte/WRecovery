@@ -1,0 +1,15 @@
+#!/bin/sh
+# wfind - search every mounted volume (case insensitive), e.g.
+#   wfind '*.pbk'          wfind 'SAM'          wfind '*.xml'
+#
+# extra arguments are passed to find, e.g.  wfind '*.evtx' -size +1M
+
+. /lib/wrecovery.sh
+
+[ -n "$1" ] || { sed -n '2,5p' "$0"; exit 2; }
+pat=$1
+shift
+
+for mp in $(mounted_mountpoints); do
+	find "$mp" -iname "$pat" "$@" 2>/dev/null
+done
