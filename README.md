@@ -1,8 +1,8 @@
 # WRecovery
 
-**A ~5 MiB bootable ISO that mounts a dead Windows machine's disks and gets the
-network configuration back out — plus the local account password, if you are
-locked out.**
+**A ~5 MiB bootable ISO that mounts the disks of a dead **Windows** or **ESXi**
+machine and gets the network configuration back out — plus the local account /
+root password, if you are locked out.**
 
 Boots on **UEFI and BIOS**, works on servers (PERC / Smart Array / LSI HBAs,
 NVMe, virtio) and laptops (SATA, USB), needs no network, and mounts everything
@@ -126,6 +126,42 @@ works on the VGA console, over serial, and through IPMI.
 
 <img src="docs/tui-report.png" alt="report pager" width="720">
 
+## ESXi hosts
+
+ESXi keeps its whole configuration in `state.tgz` on the FAT boot partition
+(`BOOTBANK1`/`BOOTBANK2`) — nothing VMFS-specific is needed to read it:
+
+```
+wesxi                     # hostname, vmkernel IPs, DNS, NTP, vSwitches, iSCSI
+wesxi --report            # ... and save it to /run/reports/esxi-<vol>.txt
+wesxi --password          # clear the root password
+```
+
+Recovered from `etc/vmware/esx.conf`, `etc/resolv.conf`, `etc/ntp.conf`,
+`etc/hosts` and `etc/shadow`:
+
+| | |
+| --- | --- |
+| identity | hostname, domain, product |
+| network | every `/net/...` setting: vmkernel NIC IP/netmask/MAC, portgroups, vSwitch uplinks, VLAN ids |
+| DNS | nameservers and search domains |
+| NTP | configured servers and restrictions |
+| iSCSI | initiator name and targets |
+| accounts | local users and whether they have a password |
+
+`wesxi --password` writes a fresh `$6$` (SHA-512-crypt) hash for `root` into
+`etc/shadow`, repacks `state.tgz`, keeps `state.tgz.bak-<timestamp>` next to it
+and a copy in `/run/reports`, then verifies the new hash inside the tarball.
+`wesxi --undo` puts the backup back.
+
+An empty password means "no password" to PAM, so root logs in with an empty
+password and you run `passwd` immediately. The hash generator
+(`winreg cryptpw`) is verified against `openssl passwd -6` and passlib.
+
+Note: only the FAT boot partition can be read — a host whose only copy of
+`state.tgz` lives on a VMFS datastore is out of reach (no VMFS driver, and
+VMFS is not something we can reimplement in 5 MiB).
+
 ## Resetting a Windows password
 
 Locked out of a local account? The SAM hive is on the same disk:
@@ -206,7 +242,7 @@ Input: PS/2 and USB HID keyboards. Console: VGA/framebuffer and serial
 ./tests/run-tests.sh
 ```
 
-42 checks, all in QEMU:
+54 checks, all in QEMU:
 
 * builds an NTFS volume with a real Windows `SYSTEM` hive, WLAN profile XMLs, a
   VPN phonebook and a hosts file, inside a partitioned disk image,
@@ -220,7 +256,11 @@ Input: PS/2 and USB HID keyboards. Console: VGA/framebuffer and serial
   account enabled, checksum valid) and compares `winreg` against
   `python-registry` for every key and value of the sample hive,
 * checks that a USB keyboard driver is loaded (a regression test: it was
-  missing once).
+  missing once),
+* ESXi: builds a boot partition with a `state.tgz`, checks the recovered
+  hostname/IP/DNS/NTP/uplinks, clears the root password and verifies the new
+  hash by regenerating it from its own salt, then restores the backup,
+* Windows console-mode reset: swaps `sethc.exe` for `cmd.exe` and undoes it.
 
 `tests/run-tests.sh --iso path/to.iso` reuses an existing ISO, `--no-uefi` skips
 the UEFI pass.
@@ -237,6 +277,8 @@ the UEFI pass.
 
 * **BitLocker** volumes are detected and reported but not unlocked (no
   `cryptsetup` in the image — it would not fit the size budget).
+* **VMFS** is not supported: ESXi recovery works on the FAT boot partition,
+  where ESXi keeps `state.tgz`.
 * **DPAPI-protected Wi-Fi keys** are flagged, and the profile XML is exported so
   Windows can import it. Decrypting them offline needs the DPAPI master keys and
   the user's password.
@@ -263,6 +305,7 @@ tests/run-tests.sh          end-to-end BIOS/UEFI/virtio tests
 tests/mkhive.py             registry hive writer for fixtures
 tests/mksam.py              synthetic SAM hive (accounts, groups)
 tests/mkstatic.py           synthetic SYSTEM hive with a static IP
+tests/mkesxi.py             synthetic ESXi boot partition (state.tgz)
 tests/test-sam.py           verifies a patched SAM with python-registry
 ```
 

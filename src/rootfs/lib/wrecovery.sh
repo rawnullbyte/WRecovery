@@ -288,12 +288,15 @@ wrecovery_boot() {
 	if [ "$(list_disks | wc -l)" = 0 ]; then
 		msg "No disks were detected at all."
 		msg ""
-		msg "Storage-related kernel messages (the controller that is missing):"
-		dmesg 2>/dev/null | grep -iE 'scsi|ata|nvme|ahci|raid|virtio|mmc|sd ' | tail -n 12 | sed 's/^/  /'
+		wstorage
 		msg ""
-		msg "If the controller above is not supported, this ISO cannot see"
-		msg "the disks; otherwise check the cabling/backplane and the RAID"
-		msg "virtual disk in the controller firmware (Ctrl-R at boot)."
+		msg "A controller listed with <none> has no driver in this kernel."
+		msg "Otherwise check the RAID virtual disk in the controller firmware"
+		msg "(Ctrl-R / F8 at boot) and the backplane cabling."
+		msg ""
+		msg "Recent storage kernel messages:"
+		dmesg 2>/dev/null | grep -iE 'scsi|ata|nvme|ahci|raid|virtio|mmc|sd ' \
+			| tail -n 8 | sed 's/^/  /'
 		msg ""
 	fi
 

@@ -7,6 +7,8 @@ cat <<EOF
 WRecovery $WRE_VERSION - offline Windows recovery shell
 
   wdisks                 list disks, partitions, filesystems, Windows installs
+  wstorage               PCI storage controllers and their drivers
+  wretui                 start the menu (or leave it with q, come back with this)
   wmount                 mount every Windows volume read-only (default)
   wmount -w sdb1         mount one volume read-write
   wmount -u              unmount everything
@@ -15,6 +17,7 @@ WRecovery $WRE_VERSION - offline Windows recovery shell
   wnet /mnt/nvme0n1p3    only scan one volume
   wsave /mnt/sdb1        copy /run/reports to a USB stick
 
+  wesxi                  ESXi host: network config, users, root password
   wpasswd                list local Windows accounts
   wpasswd <user>         clear a local account's password (empty password)
   wpasswd <vol> <user>   same, on a specific volume (see wdisks)

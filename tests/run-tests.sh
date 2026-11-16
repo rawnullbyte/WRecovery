@@ -109,6 +109,9 @@ mkdir -p "$TREE/Windows/System32/config" "$TREE/Windows/System32/drivers/etc"
 mkdir -p "$TREE/ProgramData/Microsoft/Wlansvc/Profiles/Interfaces/{621FDE4B-E28A-42F2-BE94-66EBE60E3580}"
 mkdir -p "$TREE/ProgramData/Microsoft/Network/Connections/Pbk"
 cp "$HIVE" "$TREE/Windows/System32/config/SYSTEM"
+printf 'fake cmd.exe\n' >"$TREE/Windows/System32/cmd.exe"
+printf 'fake sethc.exe\n' >"$TREE/Windows/System32/sethc.exe"
+printf 'fake utilman.exe\n' >"$TREE/Windows/System32/utilman.exe"
 python3 "$ROOT/tests/mksam.py" "$TREE/Windows/System32/config/SAM" >/dev/null
 
 cat >"$TREE/Windows/System32/drivers/etc/hosts" <<'EOF'
@@ -202,6 +205,12 @@ python3 "$ROOT/scripts/mkfat.py" "$TMP/static.img" "$TMP/static-tree" \
 	--label LABDISK --size 4194304 >/dev/null
 ok "static-ip test volume"
 
+# --- an ESXi boot partition (state.tgz with etc/...) ------------------------
+python3 "$ROOT/tests/mkesxi.py" "$TMP/esxi-tree" >/dev/null
+python3 "$ROOT/scripts/mkfat.py" "$TMP/esxi.img" "$TMP/esxi-tree" \
+	--label BOOTBANK1 --size 4194304 >/dev/null
+ok "esxi boot partition"
+
 # --- a "USB stick" for wsave ------------------------------------------------
 mkdir -p "$TMP/usbtree"
 echo "usb stick" >"$TMP/usbtree/README.txt"
@@ -233,7 +242,8 @@ expect() { # log pattern description
 	fi
 }
 
-DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide -drive file=$TMP/usb.img,format=raw,if=ide -drive file=$TMP/static.img,format=raw,if=ide"
+DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide -drive file=$TMP/usb.img,format=raw,if=ide -drive file=$TMP/static.img,format=raw,if=ide \
+-drive file=$TMP/esxi.img,format=raw,if=virtio"
 
 head_ "BIOS boot"
 CMDS='echo MARKER-BIOS
@@ -243,6 +253,18 @@ grep -q "Reset a Windows password" /tmp/tui.out && echo TUI-MENU-OK
 wpasswd -n sda1 alice
 wpasswd -y sda1 alice
 winreg sam-users /mnt/sda1/Windows/System32/config/SAM
+wpasswd -y --console sda1
+head -1 /mnt/sda1/Windows/System32/sethc.exe
+wpasswd -y --console --undo sda1
+head -1 /mnt/sda1/Windows/System32/sethc.exe
+wesxi vda
+wesxi --report vda
+wesxi --password vda
+line=$(tar -xzOf /mnt/vda/state.tgz etc/shadow | grep "^root:" | cut -d: -f2)
+salt=$(printf "%s" "$line" | cut -d"$" -f3)
+[ "$line" = "$(winreg cryptpw "" "$salt")" ] && echo ESXI-HASH-OK
+wesxi --undo vda
+tar -xzOf /mnt/vda/state.tgz etc/shadow | grep -q abcdefgh && echo ESXI-UNDO-OK
 wmount -w sdb
 wsave /mnt/sdb
 cat /mnt/sdb/wrecovery-reports-*/restore-sdc.cmd
@@ -268,6 +290,17 @@ expect "$TMP/bios.log" "TUI-EXITED" "menu exits cleanly without a terminal"
 expect "$TMP/bios.log" "account   : disabled -> enabled/unlocked" "wpasswd dry run shows the change"
 expect "$TMP/bios.log" "done: password cleared, account enabled" "wpasswd cleared the password"
 expect "$TMP/bios.log" "1001       alice                    Alice Example" "sam-users lists the account"
+expect "$TMP/bios.log" "/sethc.exe (original kept as sethc.exe.wrecovery)" "console mode replaced sethc.exe"
+expect "$TMP/bios.log" "fake cmd.exe" "sethc.exe now runs cmd.exe"
+expect "$TMP/bios.log" "restored /mnt/sda1/Windows/System32/sethc.exe" "console mode restored sethc.exe"
+expect "$TMP/bios.log" "fake sethc.exe" "original sethc.exe is back"
+expect "$TMP/bios.log" "esxi01.lab.example.com" "esxi hostname recovered"
+expect "$TMP/bios.log" "10.20.30.40" "esxi vmkernel IP recovered"
+expect "$TMP/bios.log" "nameserver 10.20.30.1" "esxi DNS recovered"
+expect "$TMP/bios.log" "ntp.lab.example.com" "esxi NTP server recovered"
+expect "$TMP/bios.log" "vmnic0" "esxi uplink recovered"
+expect "$TMP/bios.log" "ESXI-HASH-OK" "esxi root hash replaced and verified"
+expect "$TMP/bios.log" "ESXI-UNDO-OK" "esxi state.tgz restored from backup"
 expect "$TMP/bios.log" "reports copied to /mnt/sdb/wrecovery-reports-" "wsave wrote to the usb stick"
 expect "$TMP/bios.log" "WRecovery network configuration report" "saved report is readable"
 
@@ -282,7 +315,8 @@ expect "$TMP/virtio.log" "WIN_TEST" "virtual disk mounted"
 
 DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide \
 -drive file=$TMP/usb.img,format=raw,if=ide \
--drive file=$TMP/static.img,format=raw,if=ide"
+-drive file=$TMP/static.img,format=raw,if=ide \
+-drive file=$TMP/esxi.img,format=raw,if=virtio"
 
 head_ "UEFI boot"
 if [ "$UEFI" = 1 ]; then

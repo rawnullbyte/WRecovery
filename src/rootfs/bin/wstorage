@@ -1,0 +1,43 @@
+#!/bin/sh
+# wstorage - show storage controllers and whether a driver bound to them
+#
+# Useful when no disks show up: a PowerEdge/ProLiant with an unsupported RAID
+# controller looks exactly like a machine with no disks.
+
+. /lib/wrecovery.sh
+
+printf '%-12s %-10s %-9s %s\n' PCI VENDOR:DEV CLASS DRIVER
+printf '%-12s %-10s %-9s %s\n' ------------ ---------- --------- ------------------
+
+for d in /sys/bus/pci/devices/*; do
+	[ -e "$d/class" ] || continue
+	cls=$(cat "$d/class" 2>/dev/null)
+	case $cls in
+	0x0104*|0x0107*|0x0106*|0x0108*|0x0c04*|0x0180*) ;;
+	*) continue ;;
+	esac
+	name=${d##*/}
+	ven=$(cat "$d/vendor" 2>/dev/null)
+	dev=$(cat "$d/device" 2>/dev/null)
+	drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)
+	[ "$drv" = "." ] && drv=""
+	case $cls in
+	0x0104*) kind=RAID ;;
+	0x0107*) kind=SAS ;;
+	0x0106*) kind=SATA ;;
+	0x0108*) kind=NVMe ;;
+	0x0c04*) kind=FC ;;
+	*) kind=other ;;
+	esac
+	printf '%-12s %-10s %-9s %s\n' "$name" \
+		"${ven#0x}:${dev#0x}" "$kind" "${drv:-<none>}"
+done
+
+printf '\nblock devices:\n'
+if [ -z "$(list_disks)" ]; then
+	printf '  (none)\n'
+else
+	for d in $(list_disks); do
+		printf '  %-12s %s\n' "$d" "$(part_size "$d")"
+	done
+fi

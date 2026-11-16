@@ -463,12 +463,20 @@ static void ui_reset_password(void)
 		names[nusers] = strdup(name);
 		nusers++;
 	}
-	free(out);
 
 	if (nusers == 0) {
-		message("Reset a Windows password", "No local accounts found in the SAM hive.");
+		size_t mlen = strlen(out) + 512;
+		char *msg = malloc(mlen);
+
+		snprintf(msg, mlen,
+			 "No local accounts could be read from:\n  %s\n\n"
+			 "winreg sam-users said:\n%.900s", sams[picki], out);
+		free(out);
+		message("Reset a Windows password", msg);
+		free(msg);
 		return;
 	}
+	free(out);
 	i = pick("Which account?", labels, nusers, "The chosen account gets an empty password.");
 	if (i < 0)
 		return;
@@ -573,6 +581,9 @@ static const char *MENU[] = {
 	"Browse saved reports",
 	"",
 	"Reset a Windows password",
+	"Put a command prompt at the login screen",
+	"ESXi host: network configuration",
+	"ESXi host: reset root password",
 	"Save reports to a USB stick",
 	"",
 	"Shell",
@@ -582,7 +593,8 @@ static const char *MENU[] = {
 
 enum {
 	M_DISKS, M_MOUNT, M_UMOUNT, M_SEP1, M_NET, M_WIFI, M_VPN, M_REPORTS,
-	M_SEP2, M_PASSWD, M_SAVE, M_SEP3, M_SHELL, M_REBOOT, M_POWER
+	M_SEP2, M_PASSWD, M_CONSOLE, M_ESXI_NET, M_ESXI_PW, M_SAVE, M_SEP3,
+	M_SHELL, M_REBOOT, M_POWER
 };
 
 /* Draw the menu once and return the chosen action, or -1 to leave. */
@@ -722,6 +734,31 @@ int main(void)
 		case M_PASSWD:
 			ui_reset_password();
 			break;
+		case M_CONSOLE: {
+			char *items[2] = { "No, go back", "Yes, enable it" };
+			char help[512];
+
+			snprintf(help, sizeof(help),
+				 "Replace sethc.exe/utilman.exe with cmd.exe on the Windows "
+				 "volume? Undo with: wpasswd --console --undo");
+			if (pick("Command prompt at login", items, 2, help) == 1)
+				action("Command prompt at login", "wpasswd -y --console");
+			break;
+		}
+		case M_ESXI_NET:
+			action("ESXi host configuration", "wesxi --report");
+			break;
+		case M_ESXI_PW: {
+			char *items[2] = { "No, go back", "Yes, clear it" };
+			char help[512];
+
+			snprintf(help, sizeof(help),
+				 "Clear the root password of the ESXi host on the mounted "
+				 "bootpartition? (backup is kept, undo: wesxi --undo)");
+			if (pick("ESXi root password", items, 2, help) == 1)
+				action("ESXi root password", "wesxi --password");
+			break;
+		}
 		case M_SAVE:
 			action("Save reports to USB",
 			       "wusb && wsave");

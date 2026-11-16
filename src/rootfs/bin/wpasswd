@@ -16,6 +16,16 @@
 #   -y, --yes     do not ask for confirmation
 #   -n, --dry-run show what would be done
 #
+# Fallback when the SAM route is not available (domain controller, unreadable
+# hive, Microsoft account): put cmd.exe at the login screen instead.
+#
+#   wpasswd --console [vol]        enable a SYSTEM command prompt at login
+#   wpasswd --console --undo [vol] put the original files back
+#
+# After enabling it, boot Windows, press Shift five times (sethc) or click the
+# accessibility icon (utilman) on the login screen, and run
+#   net user <user> *
+#
 # After a successful reset, boot Windows and log in with an empty password.
 # Windows may still ask for a BitLocker recovery key (that is the disk
 # encryption, not the account) or for a Microsoft account password (MSA logins
@@ -25,12 +35,16 @@
 
 YES=0
 DRY=0
+CONSOLE=0
+UNDO=0
 ARGS=""
 for a in "$@"; do
 	case $a in
 	-y|--yes) YES=1 ;;
 	-n|--dry-run) DRY=1 ;;
-	-h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+	--console|--cmd) CONSOLE=1 ;;
+	--undo|--restore) UNDO=1 ;;
+	-h|--help) sed -n '2,30p' "$0"; exit 0 ;;
 	-*) die "unknown option: $a" ;;
 	*) ARGS="$ARGS $a" ;;
 	esac
@@ -38,6 +52,45 @@ done
 set -- $ARGS
 
 [ -f "$MOUNT_DB" ] || mount_all ro >/dev/null 2>&1
+
+# ------------------------------------------------------- console-mode reset --
+
+# system32_of <winroot>
+system32_of() {
+	for d in "System32" "system32" "SYSTEM32"; do
+		[ -d "$1/$d" ] && { printf '%s\n' "$1/$d"; return 0; }
+	done
+	return 1
+}
+
+# swap_console <winroot> <on|off>
+swap_console() {
+	w=$1
+	action=$2
+	s32=$(system32_of "$w") || die "no System32 in $w"
+	cmd="$s32/cmd.exe"
+	[ -f "$cmd" ] || die "$cmd not found"
+
+	for t in sethc.exe utilman.exe; do
+		target=$(find_ci "$s32" "$t") || target="$s32/$t"
+		if [ "$action" = on ]; then
+			[ -f "$target" ] || { warn "$t not present, skipping"; continue; }
+			[ -f "$target.wrecovery" ] || cp -f "$target" "$target.wrecovery" || \
+				die "cannot back up $target"
+			cp -f "$cmd" "$target" || die "cannot overwrite $target"
+			msg "replaced $target (original kept as $t.wrecovery)"
+		else
+			if [ -f "$target.wrecovery" ]; then
+				mv -f "$target.wrecovery" "$target" || die "cannot restore $target"
+				msg "restored $target"
+			else
+				warn "no backup for $t, nothing to restore"
+			fi
+		fi
+	done
+	cp -f "$s32/cmd.exe" /dev/null 2>/dev/null || true
+	sync
+}
 
 # ---------------------------------------------------------------- find SAMs --
 
@@ -72,48 +125,82 @@ fi
 
 # --------------------------------------------------------------- pick target --
 
-if [ $# -eq 1 ]; then
-	user=$1
-	vol=""
-	n=$(printf '%s\n' "$installs" | grep -c . || true)
-	if [ "${n:-0}" -gt 1 ]; then
-		printf 'more than one Windows installation:\n' >&2
-		printf '%s\n' "$installs" | while IFS='|' read -r v w s; do
-			printf '  %-12s %s\n' "$v" "$w" >&2
-		done
-		die "please name the volume: wpasswd <volume> $user"
+# resolve_volume <volume-or-empty> <what>
+# sets vol, wroot, sam, dev, mp and remounts read-write unless --dry-run
+resolve_volume() {
+	want=$1
+	if [ -n "$want" ]; then
+		vol=$want
+	else
+		n=$(printf '%s\n' "$installs" | grep -c . || true)
+		if [ "${n:-0}" -gt 1 ]; then
+			printf 'more than one Windows installation:\n' >&2
+			printf '%s\n' "$installs" | while IFS='|' read -r v w s; do
+				printf '  %-12s %s\n' "$v" "$w" >&2
+			done
+			die "please name the volume, e.g.:  $2 <volume>"
+		fi
+		vol=$(printf '%s\n' "$installs" | cut -d'|' -f1)
 	fi
-	vol=$(printf '%s\n' "$installs" | cut -d'|' -f1)
-else
-	vol=$1
-	user=$2
+
+	line=$(printf '%s\n' "$installs" | awk -F'|' -v v="$vol" \
+		'$1 == v || $2 ~ v || $3 ~ v { print; exit }')
+	[ -n "$line" ] || die "no Windows install on volume '$vol' (see: wdisks)"
+
+	wroot=$(printf '%s' "$line" | cut -d'|' -f2)
+	sam=$(printf '%s' "$line" | cut -d'|' -f3)
+	dev=/dev/$vol
+
+	is_mounted "$dev" || die "$vol is not mounted"
+	opts=$(awk -v d="$dev" '$1 == d { print $4; exit }' /proc/mounts)
+	mp=$(awk -v d="$dev" '$1 == d { print $2; exit }' /proc/mounts)
+	case ,$opts, in
+	*,ro,*)
+		if [ "$DRY" != 1 ]; then
+			msg "$vol is mounted read-only, remounting read-write"
+			mount -o remount,rw "$mp" 2>/dev/null || \
+				die "could not remount $mp read-write"
+		fi
+		;;
+	esac
+}
+
+confirm() { # question
+	if [ "$YES" = 1 ]; then
+		return 0
+	fi
+	printf '%s\n  type YES to continue: ' "$1"
+	read -r answer
+	[ "$answer" = YES ] || { msg "aborted"; exit 1; }
+}
+
+# ------------------------------------------------------------ console mode --
+
+if [ "$CONSOLE" = 1 ]; then
+	resolve_volume "${1:-}" "wpasswd --console"
+
+	if [ "$UNDO" = 1 ]; then
+		confirm "Restore the original sethc.exe/utilman.exe on $vol?"
+		swap_console "$wroot" off
+		exit 0
+	fi
+
+	confirm "Put cmd.exe at the login screen of $vol?\n\n  Boot Windows, press Shift five times (or click the accessibility icon)\n  at the login screen, and run:  net user <user> *\n\n  Undo later with:  wpasswd --console --undo $vol"
+	swap_console "$wroot" on
+	msg ""
+	msg "Now boot Windows and press Shift five times at the login screen."
+	exit 0
 fi
 
-line=$(printf '%s\n' "$installs" | awk -F'|' -v v="$vol" \
-	'$1 == v || $2 ~ v || $3 ~ v { print; exit }')
-[ -n "$line" ] || die "no Windows install on volume '$vol' (see: wdisks)"
+# ------------------------------------------------------------------- reset --
 
-wroot=$(printf '%s' "$line" | cut -d'|' -f2)
-sam=$(printf '%s' "$line" | cut -d'|' -f3)
-dev=/dev/$vol
-
-# ------------------------------------------------------------ safety checks --
-
-is_mounted "$dev" || die "$vol is not mounted"
-opts=$(awk -v d="$dev" '$1 == d { print $4; exit }' /proc/mounts)
-mp=$(awk -v d="$dev" '$1 == d { print $2; exit }' /proc/mounts)
-
-case ,$opts, in
-*,ro,*)
-	if [ "$DRY" = 1 ]; then
-		:
-	else
-		msg "$vol is mounted read-only, remounting read-write"
-		mount -o remount,rw "$mp" 2>/dev/null || \
-			die "could not remount $mp read-write"
-	fi
-	;;
-esac
+if [ $# -eq 1 ]; then
+	user=$1
+	resolve_volume "" "wpasswd"
+else
+	user=$2
+	resolve_volume "$1" "wpasswd"
+fi
 
 # A hive with a pending log is fine for reading, but writing while Windows has
 # unflushed changes would be thrown away on the next boot.
@@ -143,11 +230,7 @@ cat <<EOF
   A backup of the hive is written next to it first.
 EOF
 
-if [ "$YES" != 1 ]; then
-	printf '\n  type YES to continue: '
-	read -r answer
-	[ "$answer" = YES ] || { msg "aborted"; exit 1; }
-fi
+confirm ""
 
 stamp=$(date -u '+%Y%m%d-%H%M%S')
 backup="$sam.bak-$stamp"
@@ -157,10 +240,14 @@ mkdir -p "$REPORT_DIR"
 cp -f "$sam" "$REPORT_DIR/SAM-backup-${vol}-$stamp" 2>/dev/null || true
 msg "backup: $backup"
 
-winreg sam-reset "$sam" "$user" || die "reset failed (see the message above)"
+if ! winreg sam-reset "$sam" "$user"; then
+	msg ""
+	msg "The SAM hive could not be used for this account."
+	msg "Fallback that works on servers and domain controllers:"
+	msg "  wpasswd --console $vol"
+	exit 1
+fi
 
-# flush and keep the volume read-write: a dirty NTFS journal from the previous
-# crash is safest when the next boot can replay it against a mounted volume
 sync
 msg ""
 msg "Done. Boot Windows and log in as '$user' with an empty password."

@@ -1,0 +1,249 @@
+#!/bin/sh
+# wesxi - recover an ESXi host's network configuration and root password
+#
+#   wesxi                    show the configuration found on every mounted volume
+#   wesxi --report [vol]     also write /run/reports/esxi-<vol>.txt
+#   wesxi --password [vol]   clear the root password (empty password)
+#   wesxi --undo [vol]       restore the state.tgz backup
+#
+# ESXi persists its configuration in state.tgz on its FAT boot partition
+# (BOOTBANK1/BOOTBANK2). That tarball holds etc/vmware/esx.conf, etc/shadow,
+# etc/resolv.conf, etc/hosts, the NTP and iSCSI settings - so all of it can be
+# read, and the root hash replaced, without any VMFS support.
+#
+# An empty password field in etc/shadow means "no password" to PAM, which is
+# how the root password is cleared here. Log in afterwards and run `passwd`.
+
+. /lib/wrecovery.sh
+
+WORK=${TMPDIR:-/tmp}/wesxi.$$
+REPORT_DIR=${REPORT_DIR:-/run/reports}
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+mode=show
+vol_arg=""
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	-h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+	--report) mode=report ;;
+	--password) mode=password ;;
+	--undo) mode=undo ;;
+	-*) die "unknown option: $1" ;;
+	*) vol_arg=$1 ;;
+	esac
+	shift
+done
+
+# ------------------------------------------------------------- detection -----
+
+# esxi_state <mountpoint>: prints what to use as the configuration source
+esxi_state() {
+	mp=$1
+	for p in "state.tgz" "boot/state.tgz" "bootbank/state.tgz" \
+		 "BOOTBANK1/state.tgz" "BOOTBANK2/state.tgz" "local.tgz"; do
+		[ -f "$mp/$p" ] && { printf '%s\n' "$mp/$p"; return 0; }
+	done
+	if [ -d "$mp/etc/vmware" ]; then
+		printf '%s\n' "$mp"
+		return 0
+	fi
+	return 1
+}
+
+# "<volume>|<mountpoint>|<state>"
+list_esxi() {
+	for mp in $(mounted_mountpoints); do
+		st=$(esxi_state "$mp") || continue
+		printf '%s|%s|%s\n' "${mp##*/}" "$mp" "$st"
+	done
+}
+
+[ -f "$MOUNT_DB" ] || mount_all ro >/dev/null 2>&1
+
+installs=$(list_esxi)
+if [ -z "$installs" ]; then
+	printf 'No ESXi boot partition found on the mounted volumes.\n' >&2
+	printf 'ESXi stores it on a FAT partition (BOOTBANK1/BOOTBANK2); a pure\n' >&2
+	printf 'VMFS datastore cannot be read by this image.\n' >&2
+	exit 1
+fi
+
+if [ -n "$vol_arg" ]; then
+	line=$(printf '%s\n' "$installs" | awk -F'|' -v v="$vol_arg" \
+		'$1 == v || $2 ~ v { print; exit }')
+	[ -n "$line" ] || die "no ESXi install on '$vol_arg' (see: wdisks)"
+else
+	n=$(printf '%s\n' "$installs" | grep -c . || true)
+	if [ "${n:-0}" -gt 1 ]; then
+		printf 'more than one ESXi volume:\n' >&2
+		printf '%s\n' "$installs" | while IFS='|' read -r v m s; do
+			printf '  %-12s %s\n' "$v" "$s" >&2
+		done
+		die "please name the volume, e.g.: wesxi $mode <volume>"
+	fi
+	line=$(printf '%s\n' "$installs" | head -1)
+fi
+
+vol=$(printf '%s' "$line" | cut -d'|' -f1)
+mp=$(printf '%s' "$line" | cut -d'|' -f2)
+state=$(printf '%s' "$line" | cut -d'|' -f3)
+dev=/dev/$vol
+
+# -------------------------------------------------------------- unpack ------
+
+mkdir -p "$WORK"
+CFG=""
+PREFIX=""
+
+if [ -d "$state" ]; then
+	CFG=$state
+	for cand in "$CFG" "$CFG/.."; do
+		[ -d "$cand/etc" ] && { CFG=$(cd "$cand" && pwd); break; }
+	done
+else
+	mkdir -p "$WORK/x"
+	tar -xzf "$state" -C "$WORK/x" 2>/dev/null || die "cannot unpack $state"
+	for cand in "$WORK/x" "$WORK/x/state" "$WORK/x/etc"; do
+		[ -d "$cand/etc" ] && { CFG=$cand; break; }
+	done
+	[ -n "$CFG" ] || die "$state does not contain an etc/ tree"
+	[ "$CFG" = "$WORK/x" ] || PREFIX=${CFG#"$WORK/x"/}
+fi
+
+esx_conf=$CFG/etc/vmware/esx.conf
+shadow=$CFG/etc/shadow
+resolv=$CFG/etc/resolv.conf
+hosts=$CFG/etc/hosts
+ntp=$CFG/etc/ntp.conf
+
+# ------------------------------------------------------------------ report ---
+
+build_report() {
+	printf '=== WRecovery ESXi configuration report ===\n'
+	printf ' generated : %s\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
+	printf ' volume    : %s (%s)\n' "$vol" "$mp"
+	printf ' config    : %s\n' "$state"
+	printf '===========================================\n\n'
+
+	if [ -f "$esx_conf" ]; then
+		printf '== Host identity ==\n'
+		grep -E '^/Misc/(HostName|DomainName|HostIp|ProductName)' "$esx_conf" |
+			sed 's/^/  /'
+		printf '\n== Network: vmkernel NICs, vSwitches, uplinks, portgroups ==\n'
+		grep -E '^/net/' "$esx_conf" | sed 's/^/  /'
+		printf '\n== Other settings (NTP, iSCSI, users) ==\n'
+		grep -E '^/(NTP|ntp|iscsi|vmkiscsi|user|User|adv)/' "$esx_conf" |
+			sed 's/^/  /'
+		printf '\n'
+	else
+		printf '(no etc/vmware/esx.conf found)\n\n'
+	fi
+
+	if [ -f "$resolv" ]; then
+		printf '== DNS (etc/resolv.conf) ==\n'
+		grep -v '^[[:space:]]*#' "$resolv" | grep -v '^[[:space:]]*$' |
+			sed 's/^/  /'
+		printf '\n'
+	fi
+
+	if [ -f "$ntp" ]; then
+		printf '== NTP (etc/ntp.conf) ==\n'
+		grep -E '^[[:space:]]*(server|restrict)' "$ntp" | sed 's/^/  /'
+		printf '\n'
+	fi
+
+	if [ -f "$hosts" ]; then
+		printf '== hosts ==\n'
+		grep -v '^[[:space:]]*#' "$hosts" | grep -v '^[[:space:]]*$' |
+			sed 's/^/  /'
+		printf '\n'
+	fi
+
+	if [ -f "$shadow" ]; then
+		printf '== Local accounts (etc/shadow) ==\n'
+		awk -F: '
+			$1 != "" {
+				state = ($2 == "" || $2 == "*" || $2 == "!!") ?
+					"no password" : "password set"
+				printf "  %-20s %s\n", $1, state
+			}' "$shadow"
+		printf '\n'
+	fi
+}
+
+if [ "$mode" = show ] || [ "$mode" = report ]; then
+	build_report
+	if [ "$mode" = report ]; then
+		mkdir -p "$REPORT_DIR"
+		build_report >"$REPORT_DIR/esxi-$vol.txt"
+		msg ""
+		msg "written to $REPORT_DIR/esxi-$vol.txt"
+	fi
+	exit 0
+fi
+
+# ------------------------------------------------------------------- undo ----
+
+if [ "$mode" = undo ]; then
+	last=$(ls -1t "$state".bak-* 2>/dev/null | head -1)
+	[ -n "$last" ] || die "no backup of $state found"
+	mount -o remount,rw "$mp" 2>/dev/null || die "cannot remount $mp read-write"
+	cp -f "$last" "$state" || die "cannot restore $state"
+	sync
+	msg "restored $state from $(basename "$last")"
+	exit 0
+fi
+
+# --------------------------------------------------------- password reset ----
+
+[ -f "$shadow" ] || die "no etc/shadow in $state"
+[ -n "$PREFIX" ] && warn "this state.tgz keeps its files under '$PREFIX/'"
+
+case ,$(awk -v d="$dev" '$1 == d { print $4; exit }' /proc/mounts), in
+*,ro,*)
+	msg "$vol is mounted read-only, remounting read-write"
+	mount -o remount,rw "$mp" 2>/dev/null || die "cannot remount $mp read-write"
+	;;
+esac
+
+hash=$(winreg cryptpw "") || die "cannot create a password hash"
+
+stamp=$(date -u '+%Y%m%d-%H%M%S')
+if [ -f "$state" ]; then
+	cp -f "$state" "$state.bak-$stamp" || die "cannot back up $state"
+	msg "backup: $state.bak-$stamp"
+fi
+
+awk -F: -v h="$hash" -v OFS=: '
+	$1 == "root" { $2 = h; found = 1 }
+	{ print }
+	END { exit found ? 0 : 1 }
+' "$shadow" >"$WORK/shadow.new" || die "no root account in etc/shadow"
+cp -f "$WORK/shadow.new" "$shadow" || die "cannot write etc/shadow"
+chmod 600 "$shadow" 2>/dev/null || true
+
+if [ -f "$state" ]; then
+	mkdir -p "$REPORT_DIR"
+	cp -f "$state" "$REPORT_DIR/state.tgz-backup-$vol-$stamp" 2>/dev/null || true
+	if [ -n "$PREFIX" ]; then
+		( cd "$WORK/x" && tar -czf "$WORK/state.tgz" "$PREFIX" ) ||
+			die "cannot repack"
+	else
+		( cd "$WORK/x" && tar -czf "$WORK/state.tgz" etc ) ||
+			die "cannot repack"
+	fi
+	cp -f "$WORK/state.tgz" "$state" || die "cannot write $state"
+	sync
+fi
+
+# sanity: the new hash must be in the file we just wrote
+if [ -f "$state" ] && ! tar -xzOf "$state" ${PREFIX:+"$PREFIX/"}etc/shadow 2>/dev/null |
+	grep -q "^root:$hash"; then
+	warn "could not verify the new hash inside $state"
+fi
+
+msg ""
+msg "root password of $vol cleared (empty password)"
+msg "log in as root on the DCUI/SSH and run: passwd"
+msg "undo with: wesxi --undo $vol"
