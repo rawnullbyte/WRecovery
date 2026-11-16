@@ -149,6 +149,8 @@ Recovered from `etc/vmware/esx.conf`, `etc/resolv.conf`, `etc/ntp.conf`,
 | iSCSI | initiator name and targets |
 | accounts | local users and whether they have a password |
 
+<img src="docs/tui-esxi.png" alt="ESXi report in the menu" width="720">
+
 `wesxi --password` writes a fresh `$6$` (SHA-512-crypt) hash for `root` into
 `etc/shadow`, repacks `state.tgz`, keeps `state.tgz.bak-<timestamp>` next to it
 and a copy in `/run/reports`, then verifies the new hash inside the tarball.
