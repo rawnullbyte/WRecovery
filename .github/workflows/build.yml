@@ -30,6 +30,9 @@ jobs:
             python3 curl xz-utils cpio file \
             qemu-system-x86 ovmf ntfs-3g fuse3
 
+      - name: install test helpers
+        run: python3 -m pip install --quiet --break-system-packages python-registry
+
       - name: cache kernel tree
         uses: actions/cache@v4
         with:
