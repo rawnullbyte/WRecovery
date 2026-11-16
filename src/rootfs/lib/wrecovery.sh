@@ -246,6 +246,25 @@ reg_get() { winreg get "$1" "$2" "$3" 2>/dev/null; }
 
 reg_has_key() { winreg exists "$1" "$2" >/dev/null 2>&1; }
 
+# sam_hive_of <winroot>
+sam_hive_of() {
+	for p in "System32/config/SAM" "system32/config/SAM" \
+		 "System32/config/sam" "system32/config/sam"; do
+		[ -f "$1/$p" ] && { printf '%s\n' "$1/$p"; return 0; }
+	done
+	return 1
+}
+
+# win_installs: "<volume>|<windows root>|<sam hive>" per Windows install
+win_installs() {
+	wnet_targets | while read -r mp; do
+		for w in $(win_roots "$mp"); do
+			sam=$(sam_hive_of "$w" 2>/dev/null) || sam=""
+			printf '%s|%s|%s\n' "${mp##*/}" "$w" "$sam"
+		done
+	done
+}
+
 # wnet_targets: mount points that contain a Windows install
 wnet_targets() {
 	mounted_mountpoints | while read -r mp; do
@@ -266,10 +285,22 @@ wrecovery_boot() {
 	wdisks
 	msg ""
 
+	if [ "$(list_disks | wc -l)" = 0 ]; then
+		msg "No disks were detected at all."
+		msg ""
+		msg "Storage-related kernel messages (the controller that is missing):"
+		dmesg 2>/dev/null | grep -iE 'scsi|ata|nvme|ahci|raid|virtio|mmc|sd ' | tail -n 12 | sed 's/^/  /'
+		msg ""
+		msg "If the controller above is not supported, this ISO cannot see"
+		msg "the disks; otherwise check the cabling/backplane and the RAID"
+		msg "virtual disk in the controller firmware (Ctrl-R at boot)."
+		msg ""
+	fi
+
 	n=$(wnet_targets | wc -l)
 	if [ "${n:-0}" = 0 ]; then
 		msg "No Windows installation found on the attached disks."
-		msg "Check 'dmesg' if a disk is missing, then try 'wmount' again."
+		msg "Try 'wdisks', or 'wmount' again after attaching a disk."
 	else
 		wnet -q
 		msg "== Recovered network configuration =="

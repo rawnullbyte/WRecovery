@@ -1,66 +1,83 @@
 # WRecovery
 
-A ~5 MiB bootable ISO that mounts the Windows drives of a broken machine and
-recovers their network configuration (static IPs, DHCP leases, DNS servers,
-Wi-Fi profiles and keys, VPN phonebooks, proxy settings, hosts files) and can
-clear the password of a local Windows account.
+**A ~5 MiB bootable ISO that mounts a dead Windows machine's disks and gets the
+network configuration back out — plus the local account password, if you are
+locked out.**
 
-Boots on **UEFI and BIOS**, read-only by default, nothing to install and no
-network access required.
+Boots on **UEFI and BIOS**, works on servers (PERC / Smart Array / LSI HBAs,
+NVMe, virtio) and laptops (SATA, USB), needs no network, and mounts everything
+**read-only** unless you explicitly ask otherwise.
+
+[![build](https://github.com/rawnullbyte/WRecovery/actions/workflows/build.yml/badge.svg)](https://github.com/rawnullbyte/WRecovery/actions/workflows/build.yml)
+![size](https://img.shields.io/badge/iso-5.4%20MiB-informational)
+![firmware](https://img.shields.io/badge/boot-UEFI%20%2B%20BIOS-success)
+
+<img src="docs/tui-menu.png" alt="WRecovery menu" width="720">
 
 ```
-WRecovery 0.1.0 - offline Windows network recovery
---------------------------------------------------------
+WRecovery 0.3.0 - offline Windows recovery
+────────────────────────────────────────────────────────────
+ 1 volume(s) mounted   1 Windows install(s)   reports in /run/reports
+ > Disks, partitions and Windows installs
+   Mount all volumes (read-only)
+   Unmount all volumes
+   ──────────────────────────────────────────────────────────
+   Network configuration report
+   Wi-Fi profiles and keys
+   VPN, proxy and hosts file
+   Browse saved reports
+   ──────────────────────────────────────────────────────────
+   Reset a Windows password
+   Save reports to a USB stick
+   ──────────────────────────────────────────────────────────
+   Shell
+   Reboot
+   Power off
+```
 
-DEV                 SIZE  FS      LABEL        MOUNT              WINDOWS
--------------- ---------  ------- ------------ ------------------ -------
-nvme0n1       476.9 GiB  Samsung SSD 980 PRO
-  nvme0n1p1   100.0 MiB  vfat    SYSTEM       /mnt/nvme0n1p1     -
-  nvme0n1p2    16.0 MiB  -                    -                  -
-  nvme0n1p3   476.8 GiB  ntfs3   Windows      /mnt/nvme0n1p3     Windows
+## What it recovers
 
-== Recovered network configuration ==
- volume    : /mnt/nvme0n1p3
- computer name        DESKTOP-8H2K1
- control set          ControlSet001
+| | |
+| --- | --- |
+| **Interfaces** | friendly name, adapter model, GUID, `ControlSet` in use |
+| **Static config** | IP, mask, gateway, DNS, DNS suffix, domain, WINS, MTU |
+| **DHCP state** | `EnableDHCP`, DHCP address/server/gateway/DNS, lease times |
+| **Wireless** | every WLAN profile: SSID, auth, encryption, **PSK passphrase** |
+| **VPN** | `rasphone.pbk` entries: hostname, device, user, domain |
+| **Proxy** | WinINET proxy server, bypass list, PAC URL |
+| **Routing** | persistent static routes |
+| **Identity** | computer name, Windows edition/build, registered owner |
+| **hosts file** | non-comment entries |
 
-== IPv4 interfaces ==
--- {621FDE4B-E28A-42F2-BE94-66EBE60E3580}
-  connection           Ethernet
-  adapter              Intel(R) Ethernet Connection I219-V
-  ip assignment        static
-  static address       10.0.20.42 / 255.255.255.0
-  static gateway       10.0.20.1
-  static dns           10.0.20.10,10.0.20.11
+`Windows.old` is scanned too, so a reinstall or downgrade does not lose the old
+settings.
 
-== Wi-Fi profiles (Wlansvc) ==
--- profile: CorpNet
-  ssid                 CorpNet
-  authentication       WPA2PSK
-  encryption           AES
-  key                  correct-horse-battery
+Everything lands in `/run/reports`:
+
+```
+network-<vol>.txt      readable report
+network-<vol>.tsv      machine readable: context<TAB>field<TAB>value
+restore-<vol>.cmd      netsh script that rebuilds the static configuration
+wifi-<vol>/*.xml       WLAN profiles, importable with  netsh wlan add profile
 ```
 
 ## Quick start
 
-Build the ISO (Linux or WSL):
-
 ```sh
-./build.sh
+git clone https://github.com/rawnullbyte/WRecovery
+cd WRecovery
+./build.sh                     # -> out/wrecovery-0.3.0.iso
 ```
 
-Output: `out/wrecovery-0.2.0.iso` (~4.8 MiB) plus a `.sha256`.
-
-Write it to a USB stick or feed it to a VM:
+Write it to a USB stick (the image is isohybrid, so this is all it takes):
 
 ```sh
-sudo dd if=out/wrecovery-0.2.0.iso of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=out/wrecovery-0.3.0.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-The image is isohybrid, so it boots from a stick as well as from a real
-CD/DVD or a BMC/IPMI virtual media slot.
+…or attach the ISO through the BMC/IPMI virtual media, iDRAC, iLO, or a VM.
 
-### Build dependencies
+Build dependencies:
 
 | distro | packages |
 | --- | --- |
@@ -68,132 +85,120 @@ CD/DVD or a BMC/IPMI virtual media slot.
 | Debian/Ubuntu | `build-essential bc bison flex libelf-dev libssl-dev xorriso grub-pc-bin grub-efi-amd64-bin python3` |
 
 `scripts/fetch-tools.sh` unpacks `xorriso` and `grub` into `.cache/tools` for
-hosts where you cannot install packages (no root); `build.sh` picks them up
-automatically. Everything else is downloaded into `.cache/` and verified.
+hosts where you cannot install packages. Everything else (kernel, busybox) is
+downloaded into `.cache/` and verified against pinned sha256 sums.
 
-Building takes a few minutes the first time (the kernel is compiled from
-source), seconds afterwards.
+First build takes a few minutes (the kernel is compiled), then seconds.
 
 ## Using it
 
-Boot the machine with the ISO. The environment comes up on the screen
-(`tty1`), with extra consoles on `tty2`/`tty3` and on the first serial port.
-
-Everything is mounted **read-only**. Nothing is written to the Windows volumes
-unless you explicitly ask for it.
+The menu comes up on the VGA console. **Every menu entry is also a command**, so
+you can ignore the menu completely: press `q` for a shell, or use the serial
+console / SSH-less `ttyS0` (115200 8N1).
 
 | command | what it does |
 | --- | --- |
-| `wdisks` | list disks, partitions, filesystems and Windows installs |
+| `wdisks` | disks, partitions, filesystems, Windows installs |
 | `wmount` | mount every Windows volume read-only |
-| `wmount -w sdb1` | mount one volume read-write (repair mode) |
+| `wmount -w sdb1` | mount one volume read-write |
 | `wmount -u` | unmount everything |
 | `wnet` | recover network config from every mounted Windows install |
 | `wnet /mnt/nvme0n1p3` | recover from one volume only |
 | `wusb` | mount the first removable disk read-write |
 | `wsave /mnt/sdb1` | copy the reports to a USB stick |
-| `wpasswd` | list local Windows accounts (RID, state, admin) |
-| `wpasswd <user>` | clear that account's password and enable/unlock it |
 | `wfind '*.pbk'` | search all mounted volumes |
-| `winreg` | offline registry reader (`winreg ls/values/get/dump/exists`) |
-| `whelp` | summary of all of the above |
+| `wpasswd` | list local Windows accounts |
+| `wpasswd Administrator` | clear that account's password |
+| `winreg` | offline registry reader/writer (`ls`, `values`, `get`, `dump`, `sam-users`, `sam-reset`) |
+| `wretui` | start the menu by hand (e.g. from the serial console) |
+| `whelp` | everything above, on one screen |
 
-The boot process already mounts the disks and writes the reports, so in the
-normal case you only need to read the screen and copy the results off.
+## The menu
 
-### What gets recovered
+The TUI is plain ANSI + termios — no ncurses, no terminfo, ~20 KiB of C. It
+works on the VGA console, over serial, and through IPMI.
 
-| artifact | source |
-| --- | --- |
-| interface list with friendly names and adapter descriptions | `SYSTEM\ControlSet00X\Control\Network` |
-| static IP / mask / gateway / DNS, DHCP flag | `SYSTEM\...\Services\Tcpip\Parameters\Interfaces\{GUID}` |
-| DHCP lease, DHCP server, DHCP DNS, last SSID | same key (`Dhcp*` values) |
-| IPv6 settings | `SYSTEM\...\Services\Tcpip6\Parameters\Interfaces\{GUID}` |
-| hostname, domain, DNS suffix, search list | `SYSTEM\...\Services\Tcpip\Parameters` |
-| persistent static routes | `SYSTEM\...\Tcpip\Parameters\PersistentRoutes` |
-| Wi-Fi profiles, SSIDs, PSK passphrases | `ProgramData\Microsoft\Wlansvc\Profiles\Interfaces\*\*.xml` |
-| VPN / dial-up entries (host, device, user) | `ProgramData\Microsoft\Network\Connections\Pbk\rasphone.pbk` |
-| proxy / PAC settings | `SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings` |
-| hosts entries | `Windows\System32\drivers\etc\hosts` |
-| machine identity, Windows version | `SYSTEM` / `SOFTWARE` hives |
+* `↑`/`↓` or `j`/`k` move, `Enter` selects, `q`/`Esc` leaves the menu.
+* Every action runs the same shell command you could type yourself; output is
+  shown in a scrollable pager (`space` page, `q` back).
+* **`Shell`** (or `q`) leaves the menu and drops you into a login shell. Type
+  `exit` there and the menu comes back.
 
-Output lands in `/run/reports`:
-
-```
-network-<vol>.txt      readable report
-network-<vol>.tsv      machine readable: context<TAB>field<TAB>value
-restore-<vol>.cmd      netsh script that rebuilds the static configuration
-wifi-<vol>/*.xml       WLAN profiles, importable with `netsh wlan add profile`
-```
-
-`Windows.old` next to the live install is scanned as well, so a downgrade or
-reinstall does not lose the old network settings.
+<img src="docs/tui-report.png" alt="report pager" width="720">
 
 ## Resetting a Windows password
 
-Lost the local administrator password? The SAM hive is on the same disk:
+Locked out of a local account? The SAM hive is on the same disk:
 
 ```
-wpasswd                       # list local accounts
+wpasswd                       # list local accounts (RID, state, admin)
 wpasswd Administrator         # clear it, enable + unlock the account
 ```
 
-What this does (the same thing ntpasswd/chntpw has done for 20 years):
+This is the technique ntpasswd/chntpw has used for 20 years:
 
 * sets the LM and NT hash *lengths* in the account's `V` record to zero, which
   makes Windows treat the password as empty,
-* clears the disabled flag and the lockout counter in the account's `F`
-  record, and sets "password never expires",
+* clears the disabled flag and lockout counter in the `F` record and sets
+  "password never expires",
 * recomputes the hive's base-block checksum, which Windows validates on load,
-* writes a copy of the SAM hive next to it (`SAM.bak-<timestamp>`) and into
-  `/run/reports` (so `wsave` carries it off the machine) before touching it.
+* writes `SAM.bak-<timestamp>` next to the hive **and** into `/run/reports`
+  before touching anything.
 
-Then boot Windows and log in with an empty password, and set a new one
-immediately.
+Then boot Windows, log in with an empty password, and set a new one.
 
-Limits of this approach:
+Limits:
 
-* **Microsoft accounts** (the login is an e-mail address) are validated
-  online — clearing the cached password does not let you into the profile.
-  Local accounts only.
-* The volume is remounted **read-write** for the operation. That is the one
-  place where WRecovery writes to a Windows disk, and it asks for confirmation
-  first.
-* If `SAM.LOG1`/`SAM.LOG2` are not empty the hive has unflushed changes and
-  Windows replays that log on boot, which can undo the reset. Boot Windows once
-  and shut it down cleanly, then run `wpasswd` again.
-* No BitLocker/Syskey handling: if the SYSTEM hive is protected by a Syskey
-  startup password this is out of scope.
+* **Microsoft accounts** (login is an e-mail) authenticate online — clearing the
+  cached hash does not get you into the profile.
+* The volume is remounted **read-write** for this operation only, after a
+  confirmation.
+* If `SAM.LOG1`/`SAM.LOG2` are non-empty the hive has unflushed changes and
+  Windows replays that log on boot, which can undo the reset. Boot Windows once,
+  shut it down cleanly, then retry.
+* Syskey/StartupKey protected hives are out of scope.
 
 ## How it works
 
 ```
 build.sh
- ├─ fetch + verify    kernel tarball, busybox tarball (sha256 pinned)
- ├─ build             winreg (static C), busybox (static), linux bzImage
- ├─ initramfs         busybox + scripts + winreg -> cpio.gz
- ├─ kernel            CONFIG_INITRAMFS_SOURCE embeds the initramfs
- └─ iso               grub BIOS eltorito.img + grub EFI image in a FAT16
-                      El Torito partition, isohybrid MBR/GPT
+ ├─ fetch + verify   kernel tarball, busybox tarball (sha256 pinned)
+ ├─ build            winreg (static C), wretui, busybox, linux bzImage
+ ├─ initramfs        busybox + scripts + tools -> cpio.gz (xz/gz)
+ ├─ kernel           CONFIG_INITRAMFS_SOURCE embeds the initramfs
+ └─ iso              GRUB BIOS eltorito.img + GRUB EFI in a FAT16 El Torito
+                     partition, isohybrid MBR/GPT
 ```
 
-* **One kernel file, both firmwares.** GRUB's `i386-pc-eltorito` image boots
-  the kernel on BIOS; a GRUB `x86_64-efi` binary in a small FAT image boots it
-  on UEFI. The kernel has the initramfs built in, so there is no initrd file
-  to keep in sync.
-* **Small on purpose.** The kernel is configured from `allnoconfig` plus an
-  explicit list (`src/kernel.fragment`): no modules, no DRM, no networking
-  stack, only the storage controllers and the three filesystems that matter
-  (NTFS3, exFAT, FAT). That is the difference between 7.7 MiB and 2.1 MiB of
-  kernel.
-* **Offline registry parsing.** `src/winreg.c` is a ~1000 line read-only parser
-  for the Windows `regf` hive format (cells, hbins, `nk`/`vk`/`lf`/`li`/`ri`,
-  big-data values, UTF-16 strings). No Windows, no `chntpw`, no Python in the
-  image. It is differential-tested against
+* **One kernel file, both firmwares.** GRUB's `i386-pc-eltorito` image boots the
+  kernel on BIOS; a GRUB `x86_64-efi` binary inside a small FAT image boots it
+  on UEFI. The initramfs is built into the kernel, so there is no initrd to keep
+  in sync and no `root=` to get wrong.
+* **Small on purpose.** The kernel starts from `allnoconfig` plus an explicit
+  list (`src/kernel.fragment`) — no modules, no DRM, no networking stack, only
+  the storage controllers and the three filesystems that matter (NTFS3, exFAT,
+  FAT). That is the difference between 7.7 MiB and 2.2 MiB of kernel.
+* **Offline registry parsing.** `src/winreg.c` is a ~1100 line read-only (and
+  SAM-writing) parser for the Windows `regf` format: cells, hbins,
+  `nk`/`vk`/`lf`/`li`/`ri`, big-data values, UTF-16 strings, high-bit value
+  types. No Windows, no `chntpw`, no Python in the image. It is
+  differential-tested against
   [python-registry](https://github.com/williballenthin/python-registry) over
-  ~50k values on every CI run.
-* **Read-only by default.** All mounts are `ro`; `wmount -w` only ever writes
-  when you name the volume.
+  ~49k values on every CI run.
+* **Read-only by default.** All mounts are `ro`; only `wmount -w` and `wpasswd`
+  ever write, and both ask first.
+
+### Hardware support
+
+Storage: AHCI/SATA, ATA, NVMe, USB storage, MMC/SD, virtio-blk/-scsi,
+VMware PVSCSI, and the server HBAs that usually sit in front of the disks:
+`megaraid_sas` (Dell PERC), `mpt3sas`/`mpt2sas` (LSI SAS2/SAS3, PERC H330/H730/
+H740), `hpsa` (HP Smart Array), `aacraid`, `smartpqi`, `isci`.
+
+Filesystems: **NTFS3** (read/write), exFAT, FAT12/16/32.
+
+Input: PS/2 and USB HID keyboards. Console: VGA/framebuffer and serial
+(`console=tty0 console=ttyS0,115200n8`).
 
 ## Tests
 
@@ -201,62 +206,69 @@ build.sh
 ./tests/run-tests.sh
 ```
 
-* builds an NTFS test volume (real Windows hive, WLAN profile XMLs, VPN
-  phonebook, hosts file) inside a partitioned disk image,
-* boots the ISO in QEMU on **BIOS** and on **UEFI** with that disk attached,
-* checks that the disk is mounted, the interfaces are parsed, the Wi-Fi key is
-  recovered, the VPN host and hosts entries show up,
-* drives the guest shell over the serial console, clears a Windows password
-  with `wpasswd` (and checks the SAM hive afterwards), mounts a second disk and
-  verifies that `wsave` writes the reports to it,
-* compares `winreg` against `python-registry` for every key and value of the
-  sample hive.
+42 checks, all in QEMU:
 
-`tests/run-tests.sh --iso path/to.iso` reuses an existing ISO, `--no-uefi`
-skips the UEFI pass.
+* builds an NTFS volume with a real Windows `SYSTEM` hive, WLAN profile XMLs, a
+  VPN phonebook and a hosts file, inside a partitioned disk image,
+* boots the ISO on **BIOS**, on **UEFI** (OVMF) and with a **virtio** disk,
+* asserts: disk mounted, interfaces parsed, static IP + friendly name
+  recovered, Wi-Fi key recovered, DPAPI-protected key flagged, VPN host and
+  hosts entries present, restore script contains the right `netsh` lines,
+* drives the guest shell over the serial console: runs the menu, clears a
+  Windows password with `wpasswd`, saves the reports to a second disk,
+* host side: verifies the patched SAM with `python-registry` (hash lengths zero,
+  account enabled, checksum valid) and compares `winreg` against
+  `python-registry` for every key and value of the sample hive,
+* checks that a USB keyboard driver is loaded (a regression test: it was
+  missing once).
+
+`tests/run-tests.sh --iso path/to.iso` reuses an existing ISO, `--no-uefi` skips
+the UEFI pass.
 
 ## CI
 
 `.github/workflows/build.yml`
 
-* on every push/PR: installs the build dependencies, caches the kernel tree,
-  builds with `--size-check` (fails above 10 MiB), runs the full test suite,
-  uploads `wrecovery-<version>.iso` as an artifact.
-* on a `v*` tag: the same, then attaches the ISO and its checksum to a GitHub
-  release.
+* every push/PR: install deps, cache the kernel tree, `./build.sh --size-check`
+  (fails above 10 MiB), run the full QEMU test suite, upload the ISO artifact,
+* on a `v*` tag: attach the ISO and its sha256 to a GitHub release.
 
 ## Limitations
 
-* **BitLocker** volumes are detected and reported, but not unlocked. There is
-  no `cryptsetup` in the image (it would not fit the size budget).
-* **Password reset** only works for local accounts, and only by *clearing* the
-  password (the ntpasswd technique). Setting a specific new hash offline would
-  need the SAM boot key and RC4/AES re-encryption, which is deliberately not
-  implemented — a wrong hash leaves the account unusable.
-* **DPAPI-protected Wi-Fi keys** (`<protected>true</protected>`, typical for
-  enterprise profiles and for profiles created after Windows 10 1803) are
-  reported, and the profile XML is exported so Windows can import it. Decrypting
-  them offline needs the DPAPI master keys and the user's password — out of
-  scope here.
-* **Dynamic disks / Storage Spaces** are not assembled. Basic and GPT disks,
-  including all partitions, are.
-* **No network stack** in the image, by design: recovery data goes to a USB
-  stick (`wsave`) instead of over the network.
-* 32-bit UEFI is not supported (`BOOTX64.EFI` only).
+* **BitLocker** volumes are detected and reported but not unlocked (no
+  `cryptsetup` in the image — it would not fit the size budget).
+* **DPAPI-protected Wi-Fi keys** are flagged, and the profile XML is exported so
+  Windows can import it. Decrypting them offline needs the DPAPI master keys and
+  the user's password.
+* **Dynamic disks / Storage Spaces** are not assembled; basic and GPT disks are.
+* **32-bit UEFI** is not supported (`BOOTX64.EFI` only).
+* No network stack by design: data leaves the machine on a USB stick.
 
 ## Layout
 
 ```
 build.sh                    one-command build
-src/winreg.c                offline registry hive parser
+src/winreg.c                offline registry hive parser + SAM password reset
+src/wretui.c                the menu (ANSI + termios, no ncurses)
 src/kernel.fragment         minimal kernel config (allnoconfig base)
 src/busybox.config          busybox config (static, no network applets)
 src/rootfs/init             PID 1
-src/rootfs/lib/wrecovery.sh mount/scan helpers
-src/rootfs/bin/w*           wdisks, wmount, wnet, wsave, wfind, wusb, whelp
+src/rootfs/lib/wrecovery.sh mount/scan/report helpers
+src/rootfs/bin/w*           wdisks wmount wnet wpasswd wsave wfind wusb winstall whelp
 scripts/mkfat.py            FAT12/16 image builder (El Torito EFI boot image)
 scripts/mkinitramfs.py      cpio.gz builder with static /dev nodes
 scripts/mkdiskimg.py        MBR/GPT test disk builder
 scripts/fetch-tools.sh      rootless xorriso/grub fetch
-tests/run-tests.sh          end-to-end BIOS+UEFI tests
+tests/run-tests.sh          end-to-end BIOS/UEFI/virtio tests
+tests/mkhive.py             registry hive writer for fixtures
+tests/mksam.py              synthetic SAM hive (accounts, groups)
+tests/mkstatic.py           synthetic SYSTEM hive with a static IP
+tests/test-sam.py           verifies a patched SAM with python-registry
 ```
+
+## License
+
+MIT. Registry hive layout knowledge comes from the
+[Windows registry file format specification](https://github.com/msuhanov/regf)
+and the long-standing `chntpw`/`ntpasswd` reference implementation; the
+password-reset constants and the "clear the hash lengths" technique are theirs.

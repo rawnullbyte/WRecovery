@@ -41,26 +41,7 @@ set -- $ARGS
 
 # ---------------------------------------------------------------- find SAMs --
 
-# sam_hive <winroot>
-sam_hive() {
-	for p in "System32/config/SAM" "system32/config/SAM" \
-		 "System32/config/sam" "system32/config/sam"; do
-		[ -f "$1/$p" ] && { printf '%s\n' "$1/$p"; return 0; }
-	done
-	return 1
-}
-
-# list_installs: prints "<volume>|<winroot>|<sam>"
-list_installs() {
-	wnet_targets | while read -r mp; do
-		for wroot in $(win_roots "$mp"); do
-			sam=$(sam_hive "$wroot") || continue
-			printf '%s|%s|%s\n' "${mp##*/}" "$wroot" "$sam"
-		done
-	done
-}
-
-installs=$(list_installs)
+installs=$(win_installs | awk -F'|' '$3 != ""')
 if [ -z "$installs" ]; then
 	die "no Windows installation with a SAM hive found (try: wmount)"
 fi

@@ -39,7 +39,19 @@ spawn_shell() {
 db_reset
 wrecovery_boot >/dev/console 2>&1
 
-spawn_shell tty1
+# tty1 runs the menu; choosing "Shell" there replaces it with a login shell
+# and exiting that shell brings the menu back.
+spawn_menu() {
+	[ -c /dev/tty1 ] || return 0
+	(
+		while :; do
+			setsid sh -c "exec /bin/wretui </dev/tty1 >/dev/tty1 2>&1"
+			sleep 1
+		done
+	) &
+}
+
+spawn_menu
 spawn_shell tty2
 spawn_shell tty3
 spawn_shell ttyS0

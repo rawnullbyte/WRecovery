@@ -54,6 +54,11 @@ CONFIG_CPU_IDLE=n
 CONFIG_KALLSYMS=n
 CONFIG_DEBUG_KERNEL=n
 CONFIG_PERF_EVENTS=n
+# the Intel uncore PMU driver probes noisily on some server CPUs and we do
+# not need performance counters in a rescue environment
+CONFIG_PERF_EVENTS_INTEL_UNCORE=n
+CONFIG_PERF_EVENTS_INTEL_RAPL=n
+CONFIG_PERF_EVENTS_INTEL_CSTATE=n
 CONFIG_PROFILING=n
 CONFIG_FTRACE=n
 CONFIG_BPF_SYSCALL=n
@@ -156,16 +161,32 @@ CONFIG_PATA_VIA=y
 CONFIG_SCSI=y
 CONFIG_BLK_DEV_SD=y
 CONFIG_SCSI_VIRTIO=y
+# --- server RAID/HBA controllers -------------------------------------------
+# A PowerEdge/ProLiant/ThinkSystem presents its disks through one of these.
+# Without them the machine boots and simply finds no disks at all.
+CONFIG_MEGARAID_SAS=y
+CONFIG_SCSI_MPT3SAS=y
+CONFIG_SCSI_MPT2SAS=y
+CONFIG_SCSI_HPSA=y
+CONFIG_SCSI_AACRAID=y
+CONFIG_SCSI_SMARTPQI=y
+CONFIG_SCSI_ISCI=y
+CONFIG_SCSI_QLA_ISCSI=n
+CONFIG_VMWARE_PVSCSI=y
+CONFIG_SCSI_LOWLEVEL=y
 CONFIG_BLK_DEV_NVME=y
 CONFIG_MMC=y
 CONFIG_MMC_BLOCK=y
 CONFIG_MMC_SDHCI=y
 CONFIG_MMC_SDHCI_PCI=y
 CONFIG_MMC_SDHCI_ACPI=y
-CONFIG_VIRTIO=y
+# CONFIG_VIRTIO itself is a hidden symbol selected by the drivers below;
+# setting it directly is silently ignored.
+CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO_PCI=y
-CONFIG_VIRTIO_BLK=y
 CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_SCSI=y
 
 # --- USB (sticks, keyboards, hubs) ----------------------------------------
 CONFIG_USB=y
@@ -177,9 +198,13 @@ CONFIG_USB_OHCI_HCD=y
 CONFIG_USB_OHCI_HCD_PCI=y
 CONFIG_USB_UHCI_HCD=y
 CONFIG_USB_STORAGE=y
-CONFIG_USB_HID=y
+# HID support is a menuconfig in drivers/hid: without HID_SUPPORT the
+# HID/HID_GENERIC/USB_HID options below are silently dropped by olddefconfig
+# and a USB keyboard (VMware, many laptops) has no driver at all.
+CONFIG_HID_SUPPORT=y
 CONFIG_HID=y
 CONFIG_HID_GENERIC=y
+CONFIG_USB_HID=y
 
 # --- input -----------------------------------------------------------------
 CONFIG_INPUT=y

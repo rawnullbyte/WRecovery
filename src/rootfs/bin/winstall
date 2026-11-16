@@ -1,0 +1,7 @@
+#!/bin/sh
+# winstall - list Windows installations as "<volume>|<windows root>|<SAM hive>"
+
+. /lib/wrecovery.sh
+
+[ -f "$MOUNT_DB" ] || mount_all ro >/dev/null 2>&1
+win_installs

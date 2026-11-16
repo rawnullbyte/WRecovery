@@ -17,7 +17,7 @@
 
 set -eu
 
-VERSION=0.2.0
+VERSION=0.3.0
 KVER=6.18.63
 BBVER=1.36.1
 ISO_MAX_MB=10
@@ -133,11 +133,14 @@ unpack() { # archive destdir
 # ------------------------------------------------------------------- winreg ---
 
 build_winreg() {
-	msg "building winreg"
+	msg "building winreg and the menu"
 	mkdir -p "$BUILD/bin"
 	gcc -Os -static -s -Wall -Wextra -o "$BUILD/bin/winreg" "$ROOT/src/winreg.c"
-	# a static glibc binary is ~900 KiB; strip and compress what we can
-	ls -l "$BUILD/bin/winreg" | awk '{printf "    %s: %d KiB\n", $9, $5/1024}'
+	gcc -Os -static -s -Wall -Wextra -DWRE_VERSION='"'"$VERSION"'"' \
+		-o "$BUILD/bin/wretui" "$ROOT/src/wretui.c"
+	for b in winreg wretui; do
+		ls -l "$BUILD/bin/$b" | awk '{printf "    %s: %d KiB\n", $9, $5/1024}'
+	done
 }
 
 # ------------------------------------------------------------------ busybox ---
@@ -214,6 +217,7 @@ build_rootfs() {
 
 	cp "$BUILD/busybox-$BBVER/busybox" "$RFS/bin/busybox"
 	cp "$BUILD/bin/winreg" "$RFS/bin/winreg"
+	cp "$BUILD/bin/wretui" "$RFS/bin/wretui"
 
 	# applet symlinks
 	( cd "$RFS/bin" && "$RFS/bin/busybox" --list | while read -r a; do
@@ -231,7 +235,7 @@ build_rootfs() {
 	# version stamp
 	sed -i "s/@VERSION@/$VERSION/g" "$RFS/lib/wrecovery.sh"
 
-	chmod 0755 "$RFS/init" "$RFS/bin/busybox" "$RFS/bin/winreg"
+	chmod 0755 "$RFS/init" "$RFS/bin/busybox" "$RFS/bin/winreg" "$RFS/bin/wretui"
 	for f in "$RFS"/bin/w*; do chmod 0755 "$f"; done
 
 	"$PYTHON" "$ROOT/scripts/mkinitramfs.py" "$RFS" "$BUILD/initramfs.cpio.gz"

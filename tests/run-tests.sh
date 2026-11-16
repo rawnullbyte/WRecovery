@@ -221,10 +221,8 @@ run_vm() { # logfile extra-qemu-args... (reads commands from $CMDS)
 		fi
 	) | timeout "$TIMEOUT" "$TMP/qemu" -m 1024 -cdrom "$ISO" -net none -nographic \
 		-no-reboot -display none \
-		-drive file="$TMP/windisk.img",format=raw,if=ide \
-		-drive file="$TMP/usb.img",format=raw,if=ide \
-		-drive file="$TMP/static.img",format=raw,if=ide \
-		"$@" >"$log" 2>&1 || true
+		-device qemu-xhci -device usb-kbd \
+		${DRIVES:-} "$@" >"$log" 2>&1 || true
 }
 
 expect() { # log pattern description
@@ -235,8 +233,13 @@ expect() { # log pattern description
 	fi
 }
 
+DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide -drive file=$TMP/usb.img,format=raw,if=ide -drive file=$TMP/static.img,format=raw,if=ide"
+
 head_ "BIOS boot"
 CMDS='echo MARKER-BIOS
+dmesg | grep -c "USB Keyboard"
+wretui </dev/null >/tmp/tui.out 2>&1; echo TUI-EXITED
+grep -q "Reset a Windows password" /tmp/tui.out && echo TUI-MENU-OK
 wpasswd -n sda1 alice
 wpasswd -y sda1 alice
 winreg sam-users /mnt/sda1/Windows/System32/config/SAM
@@ -259,11 +262,27 @@ expect "$TMP/bios.log" "static address       192.168.77.10 / 255.255.255.0" "sta
 expect "$TMP/bios.log" "connection           Ethernet 2" "friendly interface name"
 expect "$TMP/bios.log" 'netsh interface ipv4 set address name="Ethernet 2" static 192.168.77.10 255.255.255.0 192.168.77.1' "restore script: static address"
 expect "$TMP/bios.log" 'netsh interface ipv4 set dns name="Ethernet 2" static 192.168.77.53 primary' "restore script: dns"
+expect "$TMP/bios.log" "USB Keyboard" "USB keyboard driver loaded"
+expect "$TMP/bios.log" "TUI-MENU-OK" "menu draws its entries"
+expect "$TMP/bios.log" "TUI-EXITED" "menu exits cleanly without a terminal"
 expect "$TMP/bios.log" "account   : disabled -> enabled/unlocked" "wpasswd dry run shows the change"
 expect "$TMP/bios.log" "done: password cleared, account enabled" "wpasswd cleared the password"
 expect "$TMP/bios.log" "1001       alice                    Alice Example" "sam-users lists the account"
 expect "$TMP/bios.log" "reports copied to /mnt/sdb/wrecovery-reports-" "wsave wrote to the usb stick"
 expect "$TMP/bios.log" "WRecovery network configuration report" "saved report is readable"
+
+head_ "virtio disk (QEMU/KVM guests)"
+DRIVES="-drive file=$TMP/windisk.img,format=raw,if=virtio"
+CMDS='echo MARKER-VIRTIO
+wdisks
+echo MARKER-VIRTIO-END'
+run_vm "$TMP/virtio.log" -boot d
+expect "$TMP/virtio.log" "vda1" "virtio disk detected as vda1"
+expect "$TMP/virtio.log" "WIN_TEST" "virtual disk mounted"
+
+DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide \
+-drive file=$TMP/usb.img,format=raw,if=ide \
+-drive file=$TMP/static.img,format=raw,if=ide"
 
 head_ "UEFI boot"
 if [ "$UEFI" = 1 ]; then
