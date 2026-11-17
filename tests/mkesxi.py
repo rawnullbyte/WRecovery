@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """mkesxi.py - build a small ESXi boot-partition tree for tests.
 
-Creates OUTDIR/boot.cfg and OUTDIR/state.tgz, where state.tgz holds the files
-an ESXi host persists: etc/vmware/esx.conf, etc/shadow, etc/resolv.conf,
-etc/hosts and etc/ntp.conf.
+Creates a realistic ESXi 7/8 boot partition:
 
-    mkesxi.py OUTDIR [root-hash]
+    BOOTDIR/boot.cfg      the bootloader config
+    BOOTDIR/state.tgz     factory state (etc/shadow has root locked)
+    BOOTDIR/local.tgz     host-specific overlay (esx.conf, etc/shadow, ...)
+    BOOTDIR/b.b00, k.b00  stand-ins for the binaries that live there
+
+local.tgz is the file that matters: ESXi unpacks state.tgz and then overlays
+local.tgz on top of it, so the network configuration and the root password are
+the ones inside local.tgz. Passing --legacy writes a single state.tgz instead
+(the pre-5.x layout).
+
+    mkesxi.py OUTDIR [root-hash] [--legacy] [--host NAME]
 """
 
 import io
@@ -13,9 +21,10 @@ import os
 import sys
 import tarfile
 
-ESX_CONF = """/Misc/HostName = "esxi01.lab.example.com"
+ESX_CONF = """/Misc/HostName = "{host}"
 /Misc/DomainName = "lab.example.com"
 /Misc/ProductName = "VMware ESXi"
+/Misc/ProductVersion = "8.0.2"
 /net/vmkernelnic/child[0000]/ip = "10.20.30.40"
 /net/vmkernelnic/child[0000]/netmask = "255.255.255.0"
 /net/vmkernelnic/child[0000]/mac = "aa:bb:cc:dd:ee:ff"
@@ -28,8 +37,20 @@ ESX_CONF = """/Misc/HostName = "esxi01.lab.example.com"
 /iscsi/initiatorname = "iqn.1998-01.com.vmware:esxi01"
 """
 
+# What the factory state.tgz carries: no site configuration, root locked.
+FACTORY_CONF = """/Misc/ProductName = "VMware ESXi"
+/Misc/ProductVersion = "8.0.2"
+/Misc/HostName = "localhost"
+"""
+
 SHADOW = (
     "root:{hash}:19000:0:99999:7:::\n"
+    "daemon:*:19000:0:99999:7:::\n"
+    "vpxuser:*:19000:0:99999:7:::\n"
+)
+
+FACTORY_SHADOW = (
+    "root:*:19000:0:99999:7:::\n"
     "daemon:*:19000:0:99999:7:::\n"
     "vpxuser:*:19000:0:99999:7:::\n"
 )
@@ -48,6 +69,13 @@ NTP = """restrict default nomodify notrap noquery
 server ntp.lab.example.com
 """
 
+BOOT_CFG = """bootstate=0
+title=Loading ESXi installer
+kernel=/b.b00
+kernelopt=runweasel
+modules=/jumpstrt.gz --- /useropts.gz --- /features.gz
+"""
+
 # $6$ with salt "abcdefgh" for the password "secret" (openssl passwd -6)
 DEFAULT_HASH = ("$6$abcdefgh$ltjgWl6579NluT/Vi1nwEvcil.G5Nbc4NiXZaNGStk8PSwGfQv72"
                 "N2CKPPrVACtLtip/cZ/1GM/O6IND4WQhG.")
@@ -62,24 +90,59 @@ def add(tar, name, data):
     tar.addfile(info, io.BytesIO(raw))
 
 
+def write_tgz(path, files):
+    with tarfile.open(path, "w:gz") as tar:
+        for name, data in files:
+            add(tar, name, data)
+
+
 def main():
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    legacy = "--legacy" in args
+    args = [a for a in args if a != "--legacy"]
+    host = "esxi01.lab.example.com"
+    if "--host" in args:
+        i = args.index("--host")
+        host = args[i + 1]
+        del args[i:i + 2]
+    if not args:
         raise SystemExit(__doc__)
-    out = sys.argv[1]
-    root_hash = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_HASH
+    out = args[0]
+    root_hash = args[1] if len(args) > 1 else DEFAULT_HASH
 
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "boot.cfg"), "w") as f:
-        f.write("bootstate=0\ntitle=Loading ESXi installer\n")
+        f.write(BOOT_CFG)
+    for name in ("b.b00", "jumpstrt.gz"):
+        with open(os.path.join(out, name), "wb") as f:
+            f.write(b"\x1f\x8b\x08\x00not really a module\n")
 
-    path = os.path.join(out, "state.tgz")
-    with tarfile.open(path, "w:gz") as tar:
-        add(tar, "etc/vmware/esx.conf", ESX_CONF)
-        add(tar, "etc/shadow", SHADOW.format(hash=root_hash))
-        add(tar, "etc/resolv.conf", RESOLV)
-        add(tar, "etc/hosts", HOSTS)
-        add(tar, "etc/ntp.conf", NTP)
-    print("mkesxi: %s" % out)
+    conf = ESX_CONF.format(host=host)
+
+    if legacy:
+        write_tgz(os.path.join(out, "state.tgz"), [
+            ("etc/vmware/esx.conf", conf),
+            ("etc/shadow", SHADOW.format(hash=root_hash)),
+            ("etc/resolv.conf", RESOLV),
+            ("etc/hosts", HOSTS),
+            ("etc/ntp.conf", NTP),
+        ])
+        print("mkesxi: %s (legacy single state.tgz)" % out)
+        return
+
+    write_tgz(os.path.join(out, "state.tgz"), [
+        ("etc/vmware/esx.conf", FACTORY_CONF),
+        ("etc/shadow", FACTORY_SHADOW),
+        ("etc/issue", "VMware ESXi 8.0.2\n"),
+    ])
+    write_tgz(os.path.join(out, "local.tgz"), [
+        ("etc/vmware/esx.conf", conf),
+        ("etc/shadow", SHADOW.format(hash=root_hash)),
+        ("etc/resolv.conf", RESOLV),
+        ("etc/hosts", HOSTS),
+        ("etc/ntp.conf", NTP),
+    ])
+    print("mkesxi: %s (state.tgz + local.tgz)" % out)
 
 
 if __name__ == "__main__":

@@ -179,7 +179,11 @@ static char *run_capture(const char *cmd, size_t *outlen)
 	char tmp[4096];
 	size_t n;
 
-	f = popen(cmd, "r");
+	/* wrap command so both stdout and stderr are captured */
+	char cmd2[4096];
+	snprintf(cmd2, sizeof(cmd2), "{ %s; } 2>&1", cmd);
+
+	f = popen(cmd2, "r");
 	if (!f)
 		return NULL;
 	while ((n = fread(tmp, 1, sizeof(tmp), f)) > 0)

@@ -68,7 +68,12 @@ volume_hint() { # dev
 	sig=$(dd if="$1" bs=1 skip=3 count=7 2>/dev/null)
 	case $sig in
 	'-FVE-FS-') printf 'BitLocker (FVE) - cannot be mounted, no unlock support yet' ;;
-	*) printf '' ;;
+	*)		# Check for VMFS datastore magic at offset 0x100000
+			magic=$(dd if="$1" bs=1 skip=65536 count=4 2>/dev/null)
+			case $magic in
+			$'\xc0\x01\xd0\x0d') printf 'VMFS datastore - not supported' ;;
+			*) printf '' ;;
+			esac ;;
 	esac
 }
 

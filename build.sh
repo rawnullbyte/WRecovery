@@ -133,12 +133,14 @@ unpack() { # archive destdir
 # ------------------------------------------------------------------- winreg ---
 
 build_winreg() {
-	msg "building winreg and the menu"
+	msg "building winreg, wretui and wenc"
 	mkdir -p "$BUILD/bin"
 	gcc -Os -static -s -Wall -Wextra -o "$BUILD/bin/winreg" "$ROOT/src/winreg.c"
 	gcc -Os -static -s -Wall -Wextra -DWRE_VERSION='"'"$VERSION"'"' \
 		-o "$BUILD/bin/wretui" "$ROOT/src/wretui.c"
-	for b in winreg wretui; do
+	gcc -Os -static -s -Wall -Wextra \
+		-o "$BUILD/bin/wenc" "$ROOT/src/wenc.c" -I "$ROOT/src/aes"
+	for b in winreg wretui wenc; do
 		ls -l "$BUILD/bin/$b" | awk '{printf "    %s: %d KiB\n", $9, $5/1024}'
 	done
 }

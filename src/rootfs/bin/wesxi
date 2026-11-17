@@ -96,6 +96,25 @@ mkdir -p "$WORK"
 CFG=""
 PREFIX=""
 
+# Check if state file is encrypted (.ve suffix)
+ve_file=""
+if [ -n "$state" ] && [ "${state##*.}" = "ve" ]; then
+	ve_file="$state"
+	# Look for encryption.info in the same directory as the .ve file
+	info_path=""
+	if [ -d "$(dirname "$ve_file")" ]; then
+		info_path="$(dirname "$ve_file")/encryption.info"
+	fi
+	[ -f "$info_path" ] || die "encryption.info not found alongside $ve_file"
+	
+	# Decrypt using wenc
+	dec_state="$WORK/decrypted-state.tgz"
+	if ! wenc "$ve_file" "$info_path" "$dec_state" 2>/dev/null; then
+		die "decryption failed - cannot read encrypted ESXi state"
+	fi
+	state="$dec_state"
+fi
+
 if [ -d "$state" ]; then
 	CFG=$state
 	for cand in "$CFG" "$CFG/.."; do
