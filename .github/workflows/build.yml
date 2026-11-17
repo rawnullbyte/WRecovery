@@ -77,7 +77,7 @@ jobs:
           name: wrecovery-iso
           path: out
 
-      - name: create release
+      - name: create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -85,4 +85,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "WRecovery $GITHUB_REF_NAME" \
             --generate-notes \
+            out/*.iso out/*.iso.sha256 \
+          || gh release upload "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --clobber \
             out/*.iso out/*.iso.sha256

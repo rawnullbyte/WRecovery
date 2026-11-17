@@ -215,6 +215,9 @@ CONFIG_SERIO_I8042=y
 CONFIG_SERIO_LIBPS2=y
 
 # --- filesystems: the whole point -----------------------------------------
+# Windows + the Linux formats people actually have on their disks. Everything
+# is read-only in practice (we mount ro), except NTFS3 which can be remounted
+# read-write for the password reset.
 CONFIG_NTFS3_FS=y
 CONFIG_NTFS3_LZX_XPRESS=y
 CONFIG_VFAT_FS=y
@@ -226,3 +229,50 @@ CONFIG_NLS_DEFAULT="utf8"
 CONFIG_NLS_UTF8=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
+
+# ext2/3/4
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_USE_FOR_EXT2=y
+CONFIG_JBD2=y
+CONFIG_FS_MBCACHE=y
+# btrfs (needs its checksums and compression libraries)
+CONFIG_BTRFS_FS=y
+CONFIG_BTRFS_FS_POSIX_ACL=n
+CONFIG_CRC32=y
+CONFIG_CRC32_SLICEBY8=y
+CONFIG_LIBCRC32C=y
+CONFIG_CRYPTO=y
+CONFIG_CRYPTO_CRC32C=y
+CONFIG_CRYPTO_CRC32=y
+CONFIG_CRYPTO_SHA256=y
+CONFIG_CRYPTO_BLAKE2B=y
+CONFIG_CRYPTO_XXHASH=y
+CONFIG_XXHASH=y
+CONFIG_ZLIB_INFLATE=y
+CONFIG_ZLIB_DEFLATE=y
+CONFIG_LZO_COMPRESS=y
+CONFIG_LZO_DECOMPRESS=y
+CONFIG_ZSTD_COMMON=y
+CONFIG_ZSTD_COMPRESS=y
+CONFIG_ZSTD_DECOMPRESS=y
+# xfs
+CONFIG_XFS_FS=y
+# f2fs (Android / cheap SSDs)
+CONFIG_F2FS_FS=y
+# squashfs/hfs/hfsplus live under "Miscellaneous filesystems" in Kconfig;
+# without MISC_FILESYSTEMS those symbols do not exist and are dropped silently
+CONFIG_MISC_FILESYSTEMS=y
+# optical and read-only formats that turn up on USB sticks
+CONFIG_ISO9660_FS=y
+CONFIG_JOLIET=y
+CONFIG_UDF_FS=y
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XZ=y
+CONFIG_SQUASHFS_LZ4=y
+CONFIG_SQUASHFS_ZSTD=y
+# macOS disks
+CONFIG_HFS_FS=y
+CONFIG_HFSPLUS_FS=y
+# other Linux filesystems, cheap and occasionally the only hope
+CONFIG_JFS_FS=y
+CONFIG_NILFS2_FS=y

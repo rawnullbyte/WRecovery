@@ -16,12 +16,14 @@ WRecovery $WRE_VERSION - offline Windows recovery shell
   wnet                   recover network config, wifi profiles, VPN, proxy
   wnet /mnt/nvme0n1p3    only scan one volume
   wsave /mnt/sdb1        copy /run/reports to a USB stick
+  wcopy <src> <dst>      copy a file or a whole tree to another volume
 
   wesxi                  ESXi host: network config, users, root password
   wpasswd                list local Windows accounts
   wpasswd <user>         clear a local account's password (empty password)
   wpasswd <vol> <user>   same, on a specific volume (see wdisks)
   wfind '*.pbk'          search all mounted volumes
+  (menu: Browse files on a volume - arrow keys, Enter, c to copy)
 
   winreg                 offline registry reader (see: winreg --help)
     winreg ls     /mnt/x/Windows/System32/config/SYSTEM

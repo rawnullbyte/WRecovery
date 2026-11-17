@@ -125,12 +125,27 @@ mount_part() {
 		return 0
 	fi
 
-	for fs in ntfs3 ntfs vfat exfat; do
+	# Windows first, then Linux/macOS/optical formats. "fs:option" means
+	# "try this filesystem with that extra mount option" (journal replay off,
+	# btrfs rescue) so a dirty filesystem still opens read-only.
+	for t in ntfs3 ntfs vfat exfat \
+		 ext4 ext4:noload xfs xfs:norecovery btrfs btrfs:rescue=all \
+		 f2fs jfs nilfs2 iso9660 udf squashfs hfsplus hfs; do
+		fs=${t%%:*}
+		extra=""
+		case $t in *:*) extra=",${t#*:}" ;; esac
 		case $fs in
-		ntfs3) o="$rw" ;;
+		ntfs3) o="$rw$extra" ;;
 		ntfs)  o="ro,nls=utf8" ;;
 		vfat)  o="$rw,iocharset=utf8,umask=022" ;;
 		exfat) o="$rw,iocharset=utf8" ;;
+		ext4|xfs|btrfs|f2fs|jfs|nilfs2)
+			case $rw in
+			ro) o="ro$extra" ;;
+			*)  o="$rw$extra" ;;
+			esac
+			;;
+		*) o="ro$extra" ;;
 		esac
 		mount -t "$fs" -o "$o" "$dev" "$mp" 2>/dev/null
 		if is_mounted "$dev"; then

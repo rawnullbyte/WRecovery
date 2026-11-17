@@ -22,6 +22,11 @@
 #include <termios.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <ctype.h>
+#include <limits.h>
 #include <sys/wait.h>
 
 #ifndef WRE_VERSION
@@ -554,6 +559,390 @@ static void ui_reports(void)
 		free(items[count]);
 }
 
+/* ---------------------------------------------------------- file browser --- */
+
+#define MAX_ENTRIES 4000
+
+struct entry {
+	char name[256];
+	int is_dir;
+	unsigned long long size;
+};
+
+static int entry_cmp(const void *a, const void *b)
+{
+	const struct entry *x = a, *y = b;
+	int r;
+
+	if (x->is_dir != y->is_dir)
+		return x->is_dir ? -1 : 1;
+	r = strcasecmp(x->name, y->name);
+	return r ? r : strcmp(x->name, y->name);
+}
+
+static int load_dir(const char *path, struct entry **out, int *count)
+{
+	DIR *d = opendir(path);
+	struct dirent *de;
+	struct entry *list = NULL;
+	int n = 0, cap = 0;
+
+	*out = NULL;
+	*count = 0;
+	if (!d)
+		return -1;
+	while ((de = readdir(d)) != NULL) {
+		struct stat st;
+		char full[PATH_MAX];
+
+		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+			continue;
+		if (n == cap) {
+			cap = cap ? cap * 2 : 64;
+			list = realloc(list, (size_t)cap * sizeof(*list));
+			if (!list) {
+				closedir(d);
+				return -1;
+			}
+		}
+		snprintf(full, sizeof(full), "%s/%s", path, de->d_name);
+		if (lstat(full, &st) != 0)
+			continue;
+		memset(&list[n], 0, sizeof(list[n]));
+		snprintf(list[n].name, sizeof(list[n].name), "%s", de->d_name);
+		list[n].is_dir = S_ISDIR(st.st_mode);
+		list[n].size = (unsigned long long)st.st_size;
+		if (n >= MAX_ENTRIES)
+			break;
+		n++;
+	}
+	closedir(d);
+	qsort(list, (size_t)n, sizeof(*list), entry_cmp);
+	*out = list;
+	*count = n;
+	return 0;
+}
+
+static void human_size(unsigned long long b, char *out, size_t outsz)
+{
+	static const char *u[] = { "B", "K", "M", "G", "T" };
+	int i = 0;
+
+	while (b >= 1024 && i < 4) {
+		b /= 1024;
+		i++;
+	}
+	snprintf(out, outsz, i ? "%llu%s" : "%llu%s", b, u[i]);
+}
+
+static int choose_destination(char *out, size_t outsz)
+{
+	char *items[64];
+	int n = 0, i, sel;
+	FILE *f = fopen("/run/state/mounts.db", "r");
+	char line[512];
+
+	items[n++] = strdup("/tmp  (RAM, lost on reboot)");
+	if (f) {
+		while (fgets(line, sizeof(line), f) && n < 63) {
+			char *p = line, *fields[6] = { 0 };
+			int k;
+
+			for (k = 0; k < 6 && p; k++) {
+				fields[k] = p;
+				p = strchr(p, '|');
+				if (p)
+					*p++ = 0;
+			}
+			if (!fields[0] || !fields[3] || !fields[5])
+				continue;
+			if (strcmp(fields[2], "mounted") != 0)
+				continue;
+			if (strcmp(fields[5], "rw") != 0)
+				continue;
+			{
+				char *tmp = malloc(320);
+
+				snprintf(tmp, 320, "/mnt/%s  (%s%s%s)", fields[0],
+					 fields[3], *fields[4] ? ", " : "",
+					 fields[4]);
+				items[n++] = tmp;
+			}
+		}
+		fclose(f);
+	}
+	sel = pick("Copy to which volume?", items, n,
+		   n == 1 ? "Nothing is mounted read-write - /tmp lives in RAM only. "
+			    "Use 'wusb' for a USB stick." : NULL);
+	if (sel < 0) {
+		for (i = 0; i < n; i++)
+			free(items[i]);
+		return -1;
+	}
+	snprintf(out, outsz, "%s", strtok(items[sel], " "));
+	for (i = 0; i < n; i++)
+		free(items[i]);
+	return 0;
+}
+
+static void view_file(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	char *buf;
+	size_t got, cap = 2 * 1024 * 1024;
+	int binary = 0, i;
+	char title[300];
+
+	if (!f) {
+		message("Cannot open", path);
+		return;
+	}
+	buf = malloc(cap + 1);
+	if (!buf) {
+		fclose(f);
+		return;
+	}
+	got = fread(buf, 1, cap, f);
+	fclose(f);
+	buf[got] = 0;
+	for (i = 0; i < (int)got && i < 4096; i++)
+		if (buf[i] == 0) {
+			binary = 1;
+			break;
+		}
+	snprintf(title, sizeof(title), "%s (%zu bytes%s)", path, got,
+		 got == cap ? ", first 2 MiB" : "");
+	if (binary) {
+		/* hex dump, 16 bytes per line */
+		size_t pos = 0, outlen = (got / 16 + 1) * 80;
+		char *out = malloc(outlen + 128);
+		char *w = out;
+
+		if (!out) {
+			free(buf);
+			return;
+		}
+		while (pos < got) {
+			size_t k;
+			int col = 0;
+
+			w += sprintf(w, "%08zx  ", pos);
+			for (k = 0; k < 16; k++) {
+				if (pos + k < got)
+					w += sprintf(w, "%02x ", (unsigned char)buf[pos + k]);
+				else
+					w += sprintf(w, "   ");
+				if (k == 7)
+					*w++ = ' ';
+			}
+			*w++ = ' ';
+			for (k = 0; k < 16 && pos + k < got; k++) {
+				unsigned char c = (unsigned char)buf[pos + k];
+
+				*w++ = isprint(c) ? (char)c : '.';
+				col++;
+			}
+			if (col)
+				*w = 0;
+			w += sprintf(w, "\n");
+			pos += 16;
+			if ((size_t)(w - out) + 200 > outlen)
+				break;
+		}
+		*w = 0;
+		page(title, out);
+		free(out);
+	} else {
+		page(title, buf);
+	}
+	free(buf);
+}
+
+static void browse_dir(const char *start, const char *volname)
+{
+	char path[PATH_MAX], title[400];
+	struct entry *list = NULL;
+	int count = 0, sel = 0, top = 0, off = 0;
+
+	snprintf(path, sizeof(path), "%s", start);
+	for (;;) {
+		int i, key, body;
+
+		if (load_dir(path, &list, &count) != 0) {
+			message("Cannot read directory", path);
+			return;
+		}
+		off = strcmp(path, "/") ? 1 : 0;
+		if (sel >= count + off)
+			sel = count + off - 1;
+		if (sel < 0)
+			sel = 0;
+		term_size();
+		body = rows - 6;
+		if (body < 3)
+			body = 3;
+		if (sel < top)
+			top = sel;
+		if (sel >= top + body)
+			top = sel - body + 1;
+
+		clear_screen();
+		goto_xy(1, 1);
+		snprintf(title, sizeof(title), " " A_BOLD "%s" A_OFF " [%s]", path,
+			 volname);
+		put_line(title);
+		put_row(2, " enter open   c copy here   q back");
+
+		for (i = 0; i < body; i++) {
+			int idx = top + i;
+			char line[600];
+
+			goto_xy(3 + i, 1);
+			fputs("\033[2K", stdout);
+			if (idx >= count + off)
+				break;
+			if (off && idx == 0) {
+				snprintf(line, sizeof(line), "d %-52.52s %10s",
+					 "..", "<parent>");
+			} else {
+				struct entry *e = &list[idx - off];
+				char sz[32];
+
+				human_size(e->size, sz, sizeof(sz));
+				snprintf(line, sizeof(line), "%s %-52.52s %10s",
+					 e->is_dir ? "d" : "-", e->name,
+					 e->is_dir ? "<dir>" : sz);
+			}
+			if (idx == sel) {
+				fputs(A_REV " > " A_OFF A_REV, stdout);
+				put_line(line);
+				fputs(A_OFF, stdout);
+			} else {
+				fputs("   ", stdout);
+				put_line(line);
+			}
+		}
+		goto_xy(rows - 1, 1);
+		if (count >= MAX_ENTRIES)
+			put_line(" (directory truncated at 4000 entries)");
+		else
+			put_line("");
+		goto_xy(rows, 1);
+		printf(A_REV " up/down move   enter open   c copy   q back " A_OFF);
+		fflush(stdout);
+
+		key = read_key();
+		if (key == 'q' || key == KEY_ESC) {
+			free(list);
+			return;
+		}
+		if (key == KEY_UP || key == 'k')
+			sel = sel > 0 ? sel - 1 : count + off - 1;
+		else if (key == KEY_DOWN || key == 'j')
+			sel = sel < count + off - 1 ? sel + 1 : 0;
+		else if (key == KEY_PGUP)
+			sel = sel - body > 0 ? sel - body : 0;
+		else if (key == KEY_PGDN)
+			sel = sel + body < count + off ? sel + body : count + off - 1;
+		else if (key == KEY_HOME)
+			sel = 0;
+		else if (key == KEY_END)
+			sel = count + off - 1;
+		else if (key == 'c') {
+			char dst[PATH_MAX], src[PATH_MAX], cmd[PATH_MAX * 2 + 32];
+
+			if (off && sel == 0)
+				continue;
+			snprintf(src, sizeof(src), "%s/%s", path, list[sel - off].name);
+			if (choose_destination(dst, sizeof(dst)) != 0)
+				continue;
+			if (!strcmp(dst, "/tmp"))
+				snprintf(dst, sizeof(dst), "/tmp");
+			snprintf(cmd, sizeof(cmd), "wcopy \"%s\" \"%s\"", src, dst);
+			{
+				size_t outlen = 0;
+				char *out = run_capture(cmd, &outlen);
+
+				page("Copy", out ? out : "(no output)");
+				free(out);
+			}
+		} else if (key == '\n') {
+			char full[PATH_MAX];
+
+			if (off && sel == 0) {
+				char *slash;
+
+				/* up one level */
+				slash = strrchr(path, '/');
+				if (!slash || slash == path)
+					snprintf(path, sizeof(path), "/");
+				else
+					*slash = 0;
+				sel = 0;
+				top = 0;
+				continue;
+			}
+			snprintf(full, sizeof(full), "%s/%s", path, list[sel - off].name);
+			if (list[sel - off].is_dir) {
+				snprintf(path, sizeof(path), "%s", full);
+				sel = 0;
+				top = 0;
+			} else {
+				view_file(full);
+			}
+		}
+	}
+}
+
+static void ui_browse(void)
+{
+	char *items[64];
+	char paths[64][PATH_MAX];
+	int n = 0, i, sel;
+	FILE *f = fopen("/run/state/mounts.db", "r");
+	char line[512];
+
+	if (!f) {
+		message("Browse files", "Nothing is mounted yet.");
+		return;
+	}
+	while (fgets(line, sizeof(line), f) && n < 63) {
+		char *p = line, *fields[6] = { 0 };
+		int k;
+
+		for (k = 0; k < 6 && p; k++) {
+			fields[k] = p;
+			p = strchr(p, '|');
+			if (p)
+				*p++ = 0;
+		}
+		if (!fields[0] || !fields[2])
+			continue;
+		if (strcmp(fields[2], "mounted") != 0)
+			continue;
+		snprintf(paths[n], sizeof(paths[n]), "/mnt/%s", fields[0]);
+		items[n] = malloc(320);
+		snprintf(items[n], 320, "%-12s %-8s %s", fields[0],
+			 fields[3] ? fields[3] : "?", fields[4] ? fields[4] : "");
+		n++;
+	}
+	fclose(f);
+	if (n == 0) {
+		message("Browse files",
+			"No volumes are mounted.\n\nUse 'Mount all volumes' first.");
+		return;
+	}
+	sel = (n == 1) ? 0 : pick("Browse which volume?", items, n, NULL);
+	if (sel < 0) {
+		for (i = 0; i < n; i++)
+			free(items[i]);
+		return;
+	}
+	browse_dir(paths[sel], items[sel]);
+	for (i = 0; i < n; i++)
+		free(items[i]);
+}
+
 /* ------------------------------------------------------------------ shell -- */
 
 static void drop_to_shell(void)
@@ -579,6 +968,7 @@ static const char *MENU[] = {
 	"Wi-Fi profiles and keys",
 	"VPN, proxy and hosts file",
 	"Browse saved reports",
+	"Browse files on a volume",
 	"",
 	"Reset a Windows password",
 	"Put a command prompt at the login screen",
@@ -591,10 +981,11 @@ static const char *MENU[] = {
 	"Power off",
 };
 
+/* keep in the same order as MENU[] above */
 enum {
 	M_DISKS, M_MOUNT, M_UMOUNT, M_SEP1, M_NET, M_WIFI, M_VPN, M_REPORTS,
-	M_SEP2, M_PASSWD, M_CONSOLE, M_ESXI_NET, M_ESXI_PW, M_SAVE, M_SEP3,
-	M_SHELL, M_REBOOT, M_POWER
+	M_BROWSE, M_SEP2, M_PASSWD, M_CONSOLE, M_ESXI_NET, M_ESXI_PW, M_SAVE,
+	M_SEP3, M_SHELL, M_REBOOT, M_POWER
 };
 
 /* Draw the menu once and return the chosen action, or -1 to leave. */
@@ -609,7 +1000,7 @@ static int menu_run(int *selp, int *top)
 
 	clear_screen();
 	goto_xy(1, 1);
-	printf(A_BOLD " WRecovery " WRE_VERSION A_OFF " - offline Windows recovery");
+	printf(A_BOLD " WRecovery " WRE_VERSION A_OFF " - offline Windows / ESXi recovery");
 	put_line("");
 	{
 		char status[256];
@@ -745,6 +1136,9 @@ int main(void)
 				action("Command prompt at login", "wpasswd -y --console");
 			break;
 		}
+		case M_BROWSE:
+			ui_browse();
+			break;
 		case M_ESXI_NET:
 			action("ESXi host configuration", "wesxi --report");
 			break;

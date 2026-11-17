@@ -1,41 +1,49 @@
 # WRecovery
 
-**A ~5 MiB bootable ISO that mounts the disks of a dead **Windows** or **ESXi**
-machine and gets the network configuration back out — plus the local account /
-root password, if you are locked out.**
+A ~7 MiB bootable ISO that mounts the disks of a dead **Windows** or **ESXi**
+machine and gets the network configuration back out — plus the local account or
+root password, if you are locked out.
 
 Boots on **UEFI and BIOS**, works on servers (PERC / Smart Array / LSI HBAs,
 NVMe, virtio) and laptops (SATA, USB), needs no network, and mounts everything
 **read-only** unless you explicitly ask otherwise.
 
 [![build](https://github.com/rawnullbyte/WRecovery/actions/workflows/build.yml/badge.svg)](https://github.com/rawnullbyte/WRecovery/actions/workflows/build.yml)
-![size](https://img.shields.io/badge/iso-5.4%20MiB-informational)
+![size](https://img.shields.io/badge/iso-6.6%20MiB-informational)
 ![firmware](https://img.shields.io/badge/boot-UEFI%20%2B%20BIOS-success)
 
 <img src="docs/tui-menu.png" alt="WRecovery menu" width="720">
 
 ```
-WRecovery 0.3.0 - offline Windows recovery
-────────────────────────────────────────────────────────────
- 1 volume(s) mounted   1 Windows install(s)   reports in /run/reports
+ WRecovery 0.4.0 - offline Windows / ESXi recovery
+  1 volume(s) mounted   1 Windows install(s)   reports in /run/reports
  > Disks, partitions and Windows installs
    Mount all volumes (read-only)
    Unmount all volumes
-   ──────────────────────────────────────────────────────────
+  ------------------------------------------------------------
    Network configuration report
    Wi-Fi profiles and keys
    VPN, proxy and hosts file
    Browse saved reports
-   ──────────────────────────────────────────────────────────
+   Browse files on a volume
+  ------------------------------------------------------------
    Reset a Windows password
+   Put a command prompt at the login screen
+   ESXi host: network configuration
+   ESXi host: reset root password
    Save reports to a USB stick
-   ──────────────────────────────────────────────────────────
+  ------------------------------------------------------------
    Shell
    Reboot
    Power off
+
+ Enter selects - arrows/jk move - q drops to a shell
+ every entry here is also a command; 'whelp' lists them
 ```
 
 ## What it recovers
+
+From Windows installs (for ESXi hosts see [ESXi hosts](#esxi-hosts)):
 
 | | |
 | --- | --- |
@@ -66,13 +74,13 @@ wifi-<vol>/*.xml       WLAN profiles, importable with  netsh wlan add profile
 ```sh
 git clone https://github.com/rawnullbyte/WRecovery
 cd WRecovery
-./build.sh                     # -> out/wrecovery-0.3.0.iso
+./build.sh                     # -> out/wrecovery-0.4.0.iso
 ```
 
 Write it to a USB stick (the image is isohybrid, so this is all it takes):
 
 ```sh
-sudo dd if=out/wrecovery-0.3.0.iso of=/dev/sdX bs=4M status=progress conv=fsync
+sudo dd if=out/wrecovery-0.4.0.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 …or attach the ISO through the BMC/IPMI virtual media, iDRAC, iLO, or a VM.
@@ -92,9 +100,10 @@ First build takes a few minutes (the kernel is compiled), then seconds.
 
 ## Using it
 
-The menu comes up on the VGA console. **Every menu entry is also a command**, so
-you can ignore the menu completely: press `q` for a shell, or use the serial
-console / SSH-less `ttyS0` (115200 8N1).
+The menu comes up on the VGA console (`tty1`). `tty2`, `tty3` and the serial
+console (`ttyS0`, 115200 8N1) get plain shells — run `wretui` there if you want
+the menu too. **Every menu entry is also a command**, so you can ignore the menu
+completely: press `q` for a shell.
 
 | command | what it does |
 | --- | --- |
@@ -106,17 +115,24 @@ console / SSH-less `ttyS0` (115200 8N1).
 | `wnet /mnt/nvme0n1p3` | recover from one volume only |
 | `wusb` | mount the first removable disk read-write |
 | `wsave /mnt/sdb1` | copy the reports to a USB stick |
+| `wcopy <src> <dst>` | copy a file or directory tree to another volume |
 | `wfind '*.pbk'` | search all mounted volumes |
 | `wpasswd` | list local Windows accounts |
-| `wpasswd Administrator` | clear that account's password |
-| `winreg` | offline registry reader/writer (`ls`, `values`, `get`, `dump`, `sam-users`, `sam-reset`) |
+| `wpasswd Administrator` | clear that account's password (enable + unlock) |
+| `wpasswd --console` | fallback: `cmd.exe` at the login screen (Shift x5) |
+| `wesxi` | ESXi host: network config, DNS, NTP, iSCSI, accounts |
+| `wesxi --password` | ESXi host: clear the root password |
+| `wstorage` | PCI storage controllers and the drivers bound to them |
+| `winstall` | Windows installs found, as `volume\|windows root\|SAM hive` |
+| `winreg` | offline registry reader/writer (`ls`, `values`, `get`, `dump`, `sam-users`, `sam-reset`, `cryptpw`) |
 | `wretui` | start the menu by hand (e.g. from the serial console) |
 | `whelp` | everything above, on one screen |
 
 ## The menu
 
-The TUI is plain ANSI + termios — no ncurses, no terminfo, ~20 KiB of C. It
-works on the VGA console, over serial, and through IPMI.
+The TUI is ~700 lines of C using plain ANSI escapes and termios — no ncurses,
+no terminfo, no extra dependency in the image. It works on the VGA console, over
+serial, and through IPMI.
 
 * `↑`/`↓` or `j`/`k` move, `Enter` selects, `q`/`Esc` leaves the menu.
 * Every action runs the same shell command you could type yourself; output is
@@ -125,6 +141,27 @@ works on the VGA console, over serial, and through IPMI.
   `exit` there and the menu comes back.
 
 <img src="docs/tui-report.png" alt="report pager" width="720">
+
+## Browsing and copying files
+
+`menu -> Browse files on a volume` (or `wcopy` from the shell) turns the ISO
+into a file-level rescue tool for any mounted volume:
+
+* arrow keys / `j` `k` walk the tree, `Enter` opens a directory,
+* `Enter` on a file shows it — text in a pager, anything binary as a hex dump
+  (first 2 MiB), so you can identify a file without knowing what it is,
+* `c` copies the file *or the whole directory tree under the cursor* to a
+  writable volume (`/tmp` in RAM, or a USB stick mounted with `wusb`),
+* `q` goes back, `wcopy <src> <dst>` does the same from the shell.
+
+<img src="docs/tui-browse.png" alt="file browser" width="720">
+
+```sh
+wcopy /mnt/sda1/Users/alice/Documents /mnt/sdb1     # keeps perms and mtimes
+```
+
+Copying refuses to recurse into itself and appends a timestamp instead of
+overwriting an existing name.
 
 ## ESXi hosts
 
@@ -201,7 +238,8 @@ Limits:
 ```
 build.sh
  ├─ fetch + verify   kernel tarball, busybox tarball (sha256 pinned)
- ├─ build            winreg (static C), wretui, busybox, linux bzImage
+ ├─ build            winreg (static C), wretui (menu + file browser), busybox,
+ │                    linux bzImage
  ├─ initramfs        busybox + scripts + tools -> cpio.gz (xz/gz)
  ├─ kernel           CONFIG_INITRAMFS_SOURCE embeds the initramfs
  └─ iso              GRUB BIOS eltorito.img + GRUB EFI in a FAT16 El Torito
@@ -223,8 +261,9 @@ build.sh
   differential-tested against
   [python-registry](https://github.com/williballenthin/python-registry) over
   ~49k values on every CI run.
-* **Read-only by default.** All mounts are `ro`; only `wmount -w` and `wpasswd`
-  ever write, and both ask first.
+* **Read-only by default.** All mounts are `ro`. Only `wmount -w`, `wpasswd`
+  (and `--console`), and `wesxi --password` ever write, and each one asks first
+  and keeps a backup (`SAM.bak-*`, `sethc.exe.wrecovery`, `state.tgz.bak-*`).
 
 ### Hardware support
 
@@ -233,10 +272,17 @@ VMware PVSCSI, and the server HBAs that usually sit in front of the disks:
 `megaraid_sas` (Dell PERC), `mpt3sas`/`mpt2sas` (LSI SAS2/SAS3, PERC H330/H730/
 H740), `hpsa` (HP Smart Array), `aacraid`, `smartpqi`, `isci`.
 
-Filesystems: **NTFS3** (read/write), exFAT, FAT12/16/32.
+Filesystems: **NTFS3** (read/write), exFAT, FAT12/16/32, **ext2/3/4**, **btrfs**,
+**XFS**, **F2FS**, JFS, NILFS2, ISO9660, UDF, SquashFS, HFS and HFS+.
+
+Dirty filesystems still open read-only: ext4 is retried with `noload`, XFS with
+`norecovery`, btrfs with `rescue=all`, so a crashed machine does not stop the
+recovery.
 
 Input: PS/2 and USB HID keyboards. Console: VGA/framebuffer and serial
-(`console=tty0 console=ttyS0,115200n8`).
+(`console=tty0 console=ttyS0,115200n8`). `wstorage` prints each storage
+controller with the driver bound to it, so an unsupported HBA is one line away
+instead of a mystery: a controller showing `<none>` has no driver in this kernel.
 
 ## Tests
 
@@ -244,7 +290,7 @@ Input: PS/2 and USB HID keyboards. Console: VGA/framebuffer and serial
 ./tests/run-tests.sh
 ```
 
-54 checks, all in QEMU:
+60 checks, all in QEMU:
 
 * builds an NTFS volume with a real Windows `SYSTEM` hive, WLAN profile XMLs, a
   VPN phonebook and a hosts file, inside a partitioned disk image,
@@ -259,10 +305,13 @@ Input: PS/2 and USB HID keyboards. Console: VGA/framebuffer and serial
   `python-registry` for every key and value of the sample hive,
 * checks that a USB keyboard driver is loaded (a regression test: it was
   missing once),
+* mounts an **ext4** and a **btrfs** volume and reads a marker file out of each,
+  then copies one out with `wcopy`,
 * ESXi: builds a boot partition with a `state.tgz`, checks the recovered
   hostname/IP/DNS/NTP/uplinks, clears the root password and verifies the new
   hash by regenerating it from its own salt, then restores the backup,
-* Windows console-mode reset: swaps `sethc.exe` for `cmd.exe` and undoes it.
+* Windows console-mode reset: swaps `sethc.exe` for `cmd.exe` and undoes it,
+* the menu advertises the file browser.
 
 `tests/run-tests.sh --iso path/to.iso` reuses an existing ISO, `--no-uefi` skips
 the UEFI pass.
@@ -298,7 +347,8 @@ src/kernel.fragment         minimal kernel config (allnoconfig base)
 src/busybox.config          busybox config (static, no network applets)
 src/rootfs/init             PID 1
 src/rootfs/lib/wrecovery.sh mount/scan/report helpers
-src/rootfs/bin/w*           wdisks wmount wnet wpasswd wsave wfind wusb winstall whelp
+src/rootfs/bin/w*           wdisks wmount wnet wpasswd wesxi wsave wcopy wfind
+                            wusb winstall wstorage wretui whelp
 scripts/mkfat.py            FAT12/16 image builder (El Torito EFI boot image)
 scripts/mkinitramfs.py      cpio.gz builder with static /dev nodes
 scripts/mkdiskimg.py        MBR/GPT test disk builder
@@ -309,6 +359,7 @@ tests/mksam.py              synthetic SAM hive (accounts, groups)
 tests/mkstatic.py           synthetic SYSTEM hive with a static IP
 tests/mkesxi.py             synthetic ESXi boot partition (state.tgz)
 tests/test-sam.py           verifies a patched SAM with python-registry
+tests/compare-registry.py   differential test against python-registry
 ```
 
 ## License

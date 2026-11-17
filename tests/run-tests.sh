@@ -205,6 +205,31 @@ python3 "$ROOT/scripts/mkfat.py" "$TMP/static.img" "$TMP/static-tree" \
 	--label LABDISK --size 4194304 >/dev/null
 ok "static-ip test volume"
 
+# --- ext4 and btrfs volumes (only if the host can create them) --------------
+MKE2FS=$(command -v mke2fs || true)
+MKBTRFS=$(command -v mkfs.btrfs || true)
+mkdir -p "$TMP/fs4" "$TMP/fsb"
+echo "ext4 marker" >"$TMP/fs4/ext4-marker.txt"
+echo "btrfs marker" >"$TMP/fsb/btrfs-marker.txt"
+if [ -n "$MKE2FS" ]; then
+	truncate -s 32M "$TMP/ext4.fs"
+	"$MKE2FS" -q -F -t ext4 -L EXT4TEST -d "$TMP/fs4" "$TMP/ext4.fs" 2>/dev/null
+	python3 "$ROOT/scripts/mkdiskimg.py" --fs "$TMP/ext4.fs" \
+		--out "$TMP/ext4.img" >/dev/null
+	ok "ext4 test volume"
+else
+	echo "  --   mke2fs not found, skipping ext4"
+fi
+if [ -n "$MKBTRFS" ]; then
+	truncate -s 160M "$TMP/btrfs.fs"
+	"$MKBTRFS" -q -f -L BTRFSTEST -r "$TMP/fsb" "$TMP/btrfs.fs" 2>/dev/null
+	python3 "$ROOT/scripts/mkdiskimg.py" --fs "$TMP/btrfs.fs" \
+		--out "$TMP/btrfs.img" >/dev/null
+	ok "btrfs test volume"
+else
+	echo "  --   mkfs.btrfs not found, skipping btrfs"
+fi
+
 # --- an ESXi boot partition (state.tgz with etc/...) ------------------------
 python3 "$ROOT/tests/mkesxi.py" "$TMP/esxi-tree" >/dev/null
 python3 "$ROOT/scripts/mkfat.py" "$TMP/esxi.img" "$TMP/esxi-tree" \
@@ -242,14 +267,23 @@ expect() { # log pattern description
 	fi
 }
 
-DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide -drive file=$TMP/usb.img,format=raw,if=ide -drive file=$TMP/static.img,format=raw,if=ide \
--drive file=$TMP/esxi.img,format=raw,if=virtio"
+EXT4_DRIVE=""
+BTRFS_DRIVE=""
+[ -f "$TMP/ext4.img" ] && EXT4_DRIVE="-drive file=$TMP/ext4.img,format=raw,if=virtio"
+[ -f "$TMP/btrfs.img" ] && BTRFS_DRIVE="-drive file=$TMP/btrfs.img,format=raw,if=virtio"
+
+DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide \
+-drive file=$TMP/usb.img,format=raw,if=ide \
+-drive file=$TMP/static.img,format=raw,if=ide \
+-drive file=$TMP/esxi.img,format=raw,if=virtio \
+${EXT4_DRIVE} ${BTRFS_DRIVE}"
 
 head_ "BIOS boot"
 CMDS='echo MARKER-BIOS
 dmesg | grep -c "USB Keyboard"
 wretui </dev/null >/tmp/tui.out 2>&1; echo TUI-EXITED
 grep -q "Reset a Windows password" /tmp/tui.out && echo TUI-MENU-OK
+grep -q "Browse files on a volume" /tmp/tui.out && echo TUI-BROWSE-OK
 wpasswd -n sda1 alice
 wpasswd -y sda1 alice
 winreg sam-users /mnt/sda1/Windows/System32/config/SAM
@@ -257,6 +291,10 @@ wpasswd -y --console sda1
 head -1 /mnt/sda1/Windows/System32/sethc.exe
 wpasswd -y --console --undo sda1
 head -1 /mnt/sda1/Windows/System32/sethc.exe
+[ -f /mnt/vdb1/ext4-marker.txt ] && echo EXT4-OK
+[ -f /mnt/vdc1/btrfs-marker.txt ] && echo BTRFS-OK
+wcopy /mnt/vdb1/ext4-marker.txt /tmp
+[ -f /tmp/ext4-marker.txt ] && echo WCOPY-OK
 wesxi vda
 wesxi --report vda
 wesxi --password vda
@@ -294,6 +332,10 @@ expect "$TMP/bios.log" "/sethc.exe (original kept as sethc.exe.wrecovery)" "cons
 expect "$TMP/bios.log" "fake cmd.exe" "sethc.exe now runs cmd.exe"
 expect "$TMP/bios.log" "restored /mnt/sda1/Windows/System32/sethc.exe" "console mode restored sethc.exe"
 expect "$TMP/bios.log" "fake sethc.exe" "original sethc.exe is back"
+expect "$TMP/bios.log" "EXT4-OK" "ext4 volume mounted and readable"
+expect "$TMP/bios.log" "BTRFS-OK" "btrfs volume mounted and readable"
+expect "$TMP/bios.log" "WCOPY-OK" "wcopy copied a file out of a volume"
+expect "$TMP/bios.log" "TUI-BROWSE-OK" "menu offers the file browser"
 expect "$TMP/bios.log" "esxi01.lab.example.com" "esxi hostname recovered"
 expect "$TMP/bios.log" "10.20.30.40" "esxi vmkernel IP recovered"
 expect "$TMP/bios.log" "nameserver 10.20.30.1" "esxi DNS recovered"
@@ -316,7 +358,8 @@ expect "$TMP/virtio.log" "WIN_TEST" "virtual disk mounted"
 DRIVES="-drive file=$TMP/windisk.img,format=raw,if=ide \
 -drive file=$TMP/usb.img,format=raw,if=ide \
 -drive file=$TMP/static.img,format=raw,if=ide \
--drive file=$TMP/esxi.img,format=raw,if=virtio"
+-drive file=$TMP/esxi.img,format=raw,if=virtio \
+${EXT4_DRIVE} ${BTRFS_DRIVE}"
 
 head_ "UEFI boot"
 if [ "$UEFI" = 1 ]; then

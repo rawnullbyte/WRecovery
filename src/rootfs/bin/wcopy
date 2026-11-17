@@ -1,0 +1,35 @@
+#!/bin/sh
+# wcopy - copy a file or directory tree to a destination volume
+#
+#   wcopy /mnt/sda1/Users/alice/Documents /mnt/sdb1
+#
+# Refuses to copy a directory into itself, keeps permissions and timestamps,
+# never overwrites an existing name (a timestamp is appended instead).
+
+. /lib/wrecovery.sh
+
+[ $# -eq 2 ] || die "usage: wcopy <source> <destination directory>"
+src=$1
+dst=$2
+
+[ -e "$src" ] || die "no such file or directory: $src"
+mkdir -p "$dst" 2>/dev/null || die "cannot create $dst"
+[ -d "$dst" ] || die "$dst is not a directory"
+
+real_src=$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")
+real_dst=$(readlink -f "$dst" 2>/dev/null || printf '%s' "$dst")
+case $real_dst/ in
+"$real_src"/*) die "refusing to copy $src into itself" ;;
+esac
+
+base=${src##*/}
+[ -n "$base" ] || base=root
+target=$dst/$base
+if [ -e "$target" ]; then
+	target=$target.$(date -u '+%Y%m%d-%H%M%S')
+fi
+
+msg "copying $src -> $target"
+cp -R -p "$src" "$target" || die "copy failed (out of space?)"
+sync
+msg "done: $(du -sh "$target" 2>/dev/null | cut -f1) in $target"
